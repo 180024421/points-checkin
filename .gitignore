@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+data/
+*.spec.bak
+_tmp_*.py
+scripts/_probe_*.py
+scripts/_scan_*.py
+.pytest_cache/
+*.log
+.env
+.env.*
+*.pem
+*.key
