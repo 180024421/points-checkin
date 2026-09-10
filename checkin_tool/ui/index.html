@@ -353,7 +353,11 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
   <main class="content">
     <!-- 概览 -->
     <section class="page active" id="page-home">
-      <div class="grid3" id="home-stats"></div>
+      <div class="grid3" id="home-stats">
+        <div class="stat ok"><div class="k">已跑</div><div class="v">—</div></div>
+        <div class="stat"><div class="k">未跑</div><div class="v">—</div></div>
+        <div class="stat warn"><div class="k">失败</div><div class="v">—</div></div>
+      </div>
       <div class="card gap-md">
         <div class="card-head"><span class="bar"></span><h2>快捷操作</h2></div>
         <div class="row">
@@ -417,7 +421,7 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
         </div>
         <table class="table">
           <thead><tr><th>时间</th><th>产品</th><th>积分</th><th>连签</th><th>说明</th></tr></thead>
-          <tbody id="credit-body"></tbody>
+          <tbody id="credit-body"><tr><td colspan="5"><div class="empty">暂无记录</div></td></tr></tbody>
         </table>
       </div>
     </section>
