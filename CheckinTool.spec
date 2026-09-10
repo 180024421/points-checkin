@@ -8,9 +8,9 @@ a = Analysis(
     pathex=["."],
     binaries=[],
     datas=[
-        ("checkin_tool/ui/index.html", "checkin_tool/ui"),
-        ("checkin_tool/ui/icon.png", "checkin_tool/ui"),
-        ("checkin_tool/ui/icon.ico", "checkin_tool/ui"),
+        ("checkin_tool/ui/index.html", "ui"),
+        ("checkin_tool/ui/icon.png", "ui"),
+        ("checkin_tool/ui/icon.ico", "ui"),
     ],
     hiddenimports=hidden + ["webview", "bottle"],
     hookspath=[],

@@ -1,4 +1,4 @@
-﻿"""兼容明文 JSON 的本地安全存储（Windows DPAPI）。"""
+"""兼容明文 JSON 的本地安全存储（Windows DPAPI）。"""
 
 from __future__ import annotations
 

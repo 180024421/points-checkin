@@ -394,20 +394,27 @@ def main() -> None:
     if not icon_path.exists():
         icon_path = _resource_path("ui", "icon.png")
     url = html_path.resolve().as_uri()
-    window_kwargs = dict(
+    # 注意：icon 是 webview.start() 的参数，create_window() 不接受，
+    # 传错会直接 TypeError 导致启动失败。
+    webview.create_window(
         title=f"积分签到工具  v{__version__}",
         url=url,
-        width=920,
-        height=680,
-        min_size=(760, 560),
+        width=980,
+        height=720,
+        min_size=(820, 600),
         resizable=True,
         text_select=True,
+        background_color="#eef3fa",
         js_api=api,
     )
+    start_kwargs: dict[str, Any] = {"debug": "--debug" in sys.argv}
     if icon_path.exists():
-        window_kwargs["icon"] = str(icon_path)
-    webview.create_window(**window_kwargs)
-    webview.start(debug=False)
+        start_kwargs["icon"] = str(icon_path)
+    try:
+        webview.start(**start_kwargs)
+    except TypeError:  # 旧版本 pywebview 不支持 icon 参数
+        start_kwargs.pop("icon", None)
+        webview.start(**start_kwargs)
 
 
 if __name__ == "__main__":
