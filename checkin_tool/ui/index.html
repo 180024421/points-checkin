@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>积分签到工具</title>
+<style>
+:root {
+  --bg: #eef2f6;
+  --panel: #ffffff;
+  --line: #e2e8f0;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --accent-soft: #eff6ff;
+  --ok: #059669;
+  --warn: #d97706;
+  --danger: #dc2626;
+  --shadow: 0 8px 24px rgba(15, 23, 42, .06);
+  --radius: 14px;
+  --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+}
+.shell {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 10px;
+  padding: 14px 16px 12px;
+}
+.top {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.brand img {
+  width: 40px; height: 40px; border-radius: 10px;
+  object-fit: cover; flex-shrink: 0;
+  border: 1px solid var(--line);
+}
+.brand h1 { font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
+.brand .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 9px; border-radius: 999px;
+  background: #f8fafc; color: var(--muted);
+  border: 1px solid var(--line); font-size: 11px; font-weight: 600;
+}
+.chip.ok { background: #ecfdf5; color: var(--ok); border-color: #a7f3d0; }
+.chip.warn { background: #fffbeb; color: var(--warn); border-color: #fde68a; }
+.chip.off { background: #f8fafc; color: var(--muted); }
+.tabs { display: flex; gap: 6px; }
+.tab {
+  border: 1px solid var(--line); background: #fff; color: var(--muted);
+  padding: 8px 14px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.content { min-height: 0; overflow: auto; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); min-height: 100%;
+}
+.page { display: none; }
+.page.active { display: block; }
+.section {
+  margin-bottom: 12px; padding: 14px; border: 1px solid var(--line);
+  border-radius: 12px; background: #f8fafc;
+}
+.section:last-child { margin-bottom: 0; }
+.label {
+  font-size: 11px; font-weight: 700; color: var(--muted);
+  letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px;
+}
+.hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+@media (max-width: 760px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+.stat {
+  background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+}
+.stat .k { color: var(--muted); font-size: 11px; }
+.stat .v { font-size: 22px; font-weight: 700; margin-top: 4px; letter-spacing: -.02em; }
+button {
+  appearance: none; border: 1px solid var(--line); background: #fff;
+  color: var(--text); border-radius: 10px; padding: 8px 12px;
+  font: inherit; font-weight: 600; cursor: pointer;
+}
+button:hover { background: #f1f5f9; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: #1d4ed8; }
+button.ghost { background: transparent; }
+button.danger { color: var(--danger); border-color: #fecaca; }
+button.sm { padding: 5px 9px; font-size: 12px; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.field { display: grid; gap: 6px; margin-bottom: 8px; }
+.field > span { color: var(--muted); font-size: 12px; }
+input, textarea, select {
+  width: 100%; border: 1px solid #cbd5e1; border-radius: 10px;
+  padding: 9px 11px; font: inherit; background: #fff; color: var(--text);
+}
+textarea { min-height: 72px; resize: vertical; font-family: var(--mono); font-size: 12px; }
+label.chk {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 12px; user-select: none;
+}
+.acc-list { display: grid; gap: 8px; }
+.acc {
+  display: flex; justify-content: space-between; gap: 10px; align-items: center;
+  padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff;
+}
+.acc .mail { font-weight: 650; }
+.acc .sub { color: var(--muted); font-size: 11px; margin-top: 3px; font-family: var(--mono); }
+.acc .actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+.empty { color: var(--muted); text-align: center; padding: 28px 8px; }
+.logbar {
+  border: 1px solid var(--line); border-radius: 12px; background: #0f172a;
+  padding: 8px 12px; max-height: 120px; overflow: auto;
+  font-family: var(--mono); font-size: 11px; color: #cbd5e1;
+}
+.logbar .ok { color: #6ee7b7; }
+.logbar .err { color: #fca5a5; }
+.gate {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(15, 23, 42, .35);
+  display: none; align-items: center; justify-content: center; padding: 24px;
+}
+.gate.show { display: flex; }
+.gate-card {
+  width: min(420px, 100%); background: #fff; border: 1px solid var(--line);
+  border-radius: 14px; padding: 22px; box-shadow: 0 18px 40px rgba(15,23,42,.18);
+}
+.gate-card h2 { font-size: 18px; margin-bottom: 6px; }
+.modal {
+  position: fixed; inset: 0; z-index: 50; display: none;
+  align-items: center; justify-content: center; padding: 20px;
+  background: rgba(15, 23, 42, .35);
+}
+.modal.show { display: flex; }
+.modal-card {
+  width: min(520px, 100%); background: #fff; border-radius: 14px;
+  border: 1px solid var(--line); padding: 16px; box-shadow: var(--shadow);
+}
+.table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.table th, .table td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+.table th { color: var(--muted); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="gate" id="gate">
+  <div class="gate-card">
+    <h2>激活后使用</h2>
+    <p class="hint" id="gate-msg" style="margin:8px 0 14px;">请输入卡密完成授权。</p>
+    <div class="field"><span>卡密</span><input id="gate-code" placeholder="粘贴卡密"></div>
+    <div class="row" style="margin-top:12px;">
+      <button class="primary" id="btn-gate-redeem" style="flex:1;">激活</button>
+      <button class="ghost" id="btn-gate-refresh">刷新状态</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal-cred">
+  <div class="modal-card">
+    <div class="label">导入账密</div>
+    <div class="grid2">
+      <div class="field"><span>产品</span>
+        <select id="cred-provider"><option value="workbuddy">WorkBuddy</option><option value="traework">TraeWork</option></select>
+      </div>
+      <div class="field"><span>备注</span><input id="cred-label" placeholder="可选"></div>
+    </div>
+    <div class="field"><span>账号（邮箱/手机）</span><input id="cred-user"></div>
+    <div class="field"><span>密码</span><input id="cred-pass" type="password"></div>
+    <label class="chk"><input type="checkbox" id="cred-login-now" checked> 保存后立即统一登录</label>
+    <div class="field" style="margin-top:10px;"><span>或批量（每行 provider,username,password[,label]）</span>
+      <textarea id="cred-batch" placeholder="workbuddy,a@x.com,pass,备注"></textarea>
+    </div>
+    <div class="row" style="margin-top:10px; justify-content:flex-end;">
+      <button class="ghost" id="btn-cred-cancel">取消</button>
+      <button class="primary" id="btn-cred-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal-token">
+  <div class="modal-card">
+    <div class="label">粘贴 Trae token</div>
+    <div class="field"><span>Token</span><input id="trae-token" type="password" placeholder="cloudide / Bearer token"></div>
+    <div class="field"><span>user_id（可空）</span><input id="trae-uid"></div>
+    <div class="row" style="justify-content:flex-end; margin-top:10px;">
+      <button class="ghost" id="btn-token-cancel">取消</button>
+      <button class="primary" id="btn-token-save">导入</button>
+    </div>
+  </div>
+</div>
+
+<div class="shell" id="shell">
+  <header class="top">
+    <div class="brand">
+      <img id="app-icon" src="icon.png" alt="">
+      <div>
+        <h1>积分签到工具 <span id="ver" style="color:var(--muted);font-size:12px;font-weight:500;">v—</span></h1>
+        <div class="sub">WorkBuddy / TraeWork · 本机签或服务器代跑</div>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip" id="chip-license">授权…</span>
+      <span class="chip" id="chip-today">今日…</span>
+      <button class="sm ghost" id="btn-refresh">刷新</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="home">概览</button>
+    <button class="tab" data-tab="accounts">账号</button>
+    <button class="tab" data-tab="today">今日</button>
+    <button class="tab" data-tab="credits">积分</button>
+    <button class="tab" data-tab="settings">设置</button>
+  </nav>
+
+  <main class="content">
+    <div class="panel">
+      <section class="page active" id="page-home">
+        <div class="section">
+          <div class="label">今日看板</div>
+          <div class="grid3" id="home-stats"></div>
+          <div class="row" style="margin-top:12px;">
+            <button class="primary" id="btn-run-local">本机立即签到</button>
+            <button id="btn-refresh-credits">刷新积分</button>
+            <button id="btn-run-server">服务器代跑</button>
+          </div>
+        </div>
+        <div class="section">
+          <div class="label">入池方式</div>
+          <p class="hint">官方客户端登录后采集 / 粘贴 token；或导入账密统一登录（优先 API，失败再开浏览器）。账密本机加密，代跑只上传 token。</p>
+          <div class="row" style="margin-top:10px;">
+            <button id="btn-import-cred">导入账密</button>
+            <button id="btn-login-all">统一登录</button>
+            <button id="btn-cap-wb">采集 WorkBuddy</button>
+            <button id="btn-cap-tw">采集 TraeWork</button>
+            <button id="btn-paste-tw">粘贴 Trae token</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" id="page-accounts">
+        <div class="section">
+          <div class="label">账号操作</div>
+          <div class="row">
+            <button class="sm" id="btn-import-cred-2">导入账密</button>
+            <button class="sm" id="btn-login-all-2">统一登录</button>
+            <button class="sm" id="btn-cap-wb-2">采集 WB</button>
+            <button class="sm" id="btn-cap-tw-2">采集 TW</button>
+            <button class="sm" id="btn-paste-tw-2">粘贴 token</button>
+            <button class="sm" id="btn-upload">上传代跑</button>
+          </div>
+        </div>
+        <div class="section">
+          <div class="label">账号列表</div>
+          <div class="acc-list" id="acc-list"><div class="empty">暂无账号</div></div>
+        </div>
+        <div class="section">
+          <div class="label">已存账密</div>
+          <div class="acc-list" id="cred-list"><div class="empty">暂无账密</div></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-today">
+        <div class="grid3">
+          <div class="section"><div class="label">已跑</div><div id="list-done" class="hint"></div></div>
+          <div class="section"><div class="label">未跑</div><div id="list-pending" class="hint"></div></div>
+          <div class="section"><div class="label">失败</div><div id="list-failed" class="hint"></div></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-credits">
+        <div class="section">
+          <div class="row" style="justify-content:space-between;margin-bottom:8px;">
+            <div class="label" style="margin:0;">积分记录</div>
+            <button class="sm danger" id="btn-clear-credits">清理</button>
+          </div>
+          <table class="table">
+            <thead><tr><th>时间</th><th>产品</th><th>积分</th><th>连签</th><th>说明</th></tr></thead>
+            <tbody id="credit-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <div class="section">
+          <div class="label">授权</div>
+          <div class="field"><span>授权服务</span><input id="set-base"></div>
+          <div class="field"><span>卡密</span><input id="set-card" type="password"></div>
+          <div class="row">
+            <button class="primary" id="btn-save-redeem">保存并激活</button>
+            <button id="btn-license-refresh">刷新授权</button>
+          </div>
+        </div>
+        <div class="section">
+          <div class="label">本机选项</div>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="set-autostart"> 开机自启</label>
+            <label class="chk"><input type="checkbox" id="set-auto"> 早晚调度</label>
+            <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <button class="sm" id="btn-clear-live">清理实时日志</button>
+            <button class="sm" id="btn-clear-runs">清理跑批日志</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div>
+    <div class="row" style="justify-content:space-between;margin-bottom:4px;">
+      <span class="hint">日志</span>
+      <button class="sm ghost" id="btn-log-clear">清理</button>
+    </div>
+    <div class="logbar" id="log"></div>
+  </div>
+</div>
+
+<script>
+const api = () => window.pywebview && window.pywebview.api;
+const $ = (id) => document.getElementById(id);
+let state = { accounts: [], credentials: [], board: {}, license: {}, settings: {} };
+
+function logLine(msg, cls='') {
+  const el = $('log');
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  const t = new Date().toLocaleTimeString();
+  div.textContent = `[${t}] ${msg}`;
+  el.prepend(div);
+  while (el.children.length > 200) el.removeChild(el.lastChild);
+}
+
+async function call(name, ...args) {
+  const a = api();
+  if (!a || !a[name]) throw new Error('界面桥接未就绪');
+  return await a[name](...args);
+}
+
+function setGate(show, msg) {
+  $('gate').classList.toggle('show', !!show);
+  if (msg) $('gate-msg').textContent = msg;
+}
+
+function renderStats(board) {
+  board = board || {};
+  $('home-stats').innerHTML = `
+    <div class="stat"><div class="k">已跑</div><div class="v">${board.done_count||0}</div></div>
+    <div class="stat"><div class="k">未跑</div><div class="v">${board.pending_count||0}</div></div>
+    <div class="stat"><div class="k">失败</div><div class="v">${board.failed_count||0}</div></div>`;
+  $('chip-today').textContent = `今日 ${board.done_count||0}/${board.total_enabled||0}`;
+  const fill = (id, rows) => {
+    const box = $(id);
+    if (!rows || !rows.length) { box.innerHTML = '<div class="empty">无</div>'; return; }
+    box.innerHTML = rows.map(r => `<div style="padding:6px 0;border-bottom:1px solid var(--line);">${r.provider} · ${r.label} · ${r.today_status||''}</div>`).join('');
+  };
+  fill('list-done', board.done);
+  fill('list-pending', board.pending);
+  fill('list-failed', board.failed);
+}
+
+function renderAccounts(rows) {
+  const box = $('acc-list');
+  if (!rows.length) { box.innerHTML = '<div class="empty">暂无账号</div>'; return; }
+  box.innerHTML = rows.map(r => `
+    <div class="acc" data-id="${r.id}">
+      <div>
+        <div class="mail">${r.provider} · ${r.label||r.id}</div>
+        <div class="sub">${r.run_mode} · ${r.today_status||'未跑'} · 积分 ${r.last_credits??'-'} · 连签 ${r.last_streak??'-'}${r.token_expired?' · 过期':''}</div>
+        <div class="sub">${r.last_error||''}</div>
+      </div>
+      <div class="actions">
+        <button class="sm" data-act="local">本机</button>
+        <button class="sm" data-act="server">代跑</button>
+        <button class="sm" data-act="upload">上传</button>
+        <button class="sm danger" data-act="del">删除</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderCreds(rows) {
+  const box = $('cred-list');
+  if (!rows.length) { box.innerHTML = '<div class="empty">暂无账密</div>'; return; }
+  box.innerHTML = rows.map(r => `
+    <div class="acc" data-cid="${r.id}">
+      <div>
+        <div class="mail">${r.provider} · ${r.username}</div>
+        <div class="sub">上次：${r.last_login_ok===true?'成功':r.last_login_ok===false?'失败':'-'} ${r.last_login_method||''} ${r.last_login_error||''}</div>
+      </div>
+      <div class="actions">
+        <button class="sm primary" data-cact="login">登录</button>
+        <button class="sm danger" data-cact="del">删除</button>
+      </div>
+    </div>`).join('');
+}
+
+function renderCredits(items) {
+  const body = $('credit-body');
+  if (!items.length) { body.innerHTML = '<tr><td colspan="5" class="empty">暂无记录</td></tr>'; return; }
+  body.innerHTML = items.map(r => `<tr>
+    <td>${(r.at||'').toString().slice(0,19)}</td>
+    <td>${r.provider||''}</td>
+    <td>${r.credits??''}</td>
+    <td>${r.streak??''}</td>
+    <td>${r.message||''}</td>
+  </tr>`).join('');
+}
+
+function applyLicense(lic) {
+  const valid = !!(lic && lic.valid);
+  const chip = $('chip-license');
+  chip.textContent = valid ? '已授权' : '未授权';
+  chip.className = 'chip ' + (valid ? 'ok' : 'warn');
+  setGate(!valid, lic && lic.message ? lic.message : '请输入卡密完成授权。');
+}
+
+function applySettings(s) {
+  s = s || {};
+  $('set-base').value = s.license_base_url || '';
+  $('set-card').value = s.card_code || '';
+  $('gate-code').value = s.card_code || '';
+  $('set-autostart').checked = !!s.autostart;
+  $('set-auto').checked = s.auto_schedule !== false;
+  $('set-evening').checked = s.evening_schedule !== false;
+}
+
+async function refreshAll() {
+  const data = await call('get_bootstrap');
+  state = data;
+  $('ver').textContent = 'v' + (data.version || '');
+  applyLicense(data.license || {});
+  applySettings(data.settings || {});
+  renderStats(data.board || {});
+  renderAccounts(data.accounts || []);
+  renderCreds(data.credentials || []);
+  renderCredits(data.credits || []);
+  (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l)));
+}
+
+async function act(fn, okMsg) {
+  try {
+    const r = await fn();
+    logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
+    if (!r.ok && r.message) alert(r.message);
+    await refreshAll();
+    return r;
+  } catch (e) {
+    logLine(String(e), 'err');
+    alert(String(e));
+  }
+}
+
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('page-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+$('btn-refresh').onclick = () => act(() => call('get_bootstrap'), '已刷新');
+$('btn-run-local').onclick = () => act(() => call('run_local_now'));
+$('btn-refresh-credits').onclick = () => act(() => call('refresh_credits'));
+$('btn-run-server').onclick = () => act(() => call('run_server_now'));
+['btn-import-cred','btn-import-cred-2'].forEach(id => $(id).onclick = () => $('modal-cred').classList.add('show'));
+['btn-login-all','btn-login-all-2'].forEach(id => $(id).onclick = () => act(() => call('unified_login', '')));
+['btn-cap-wb','btn-cap-wb-2'].forEach(id => $(id).onclick = () => act(() => call('capture_workbuddy')));
+['btn-cap-tw','btn-cap-tw-2'].forEach(id => $(id).onclick = () => act(() => call('capture_traework')));
+['btn-paste-tw','btn-paste-tw-2'].forEach(id => $(id).onclick = () => $('modal-token').classList.add('show'));
+$('btn-upload').onclick = () => act(() => call('upload_delegate', ''));
+$('btn-cred-cancel').onclick = () => $('modal-cred').classList.remove('show');
+$('btn-token-cancel').onclick = () => $('modal-token').classList.remove('show');
+$('btn-cred-save').onclick = async () => {
+  const batch = $('cred-batch').value.trim();
+  if (batch) {
+    const r = await act(() => call('import_credentials_batch', batch));
+    if (r && r.ok) {
+      $('modal-cred').classList.remove('show');
+      await act(() => call('unified_login', ''));
+    }
+    return;
+  }
+  const r = await act(() => call('import_credential', {
+    provider: $('cred-provider').value,
+    username: $('cred-user').value,
+    password: $('cred-pass').value,
+    label: $('cred-label').value,
+    login_now: $('cred-login-now').checked,
+  }));
+  if (r && r.ok) $('modal-cred').classList.remove('show');
+};
+$('btn-token-save').onclick = async () => {
+  const r = await act(() => call('paste_trae_token', $('trae-token').value, $('trae-uid').value));
+  if (r && r.ok) $('modal-token').classList.remove('show');
+};
+$('acc-list').onclick = async (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.closest('.acc').dataset.id;
+  const actName = btn.dataset.act;
+  if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
+  if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
+  if (actName === 'upload') await act(() => call('upload_delegate', id));
+  if (actName === 'del' && confirm('删除该账号？')) await act(() => call('delete_account', id));
+};
+$('cred-list').onclick = async (e) => {
+  const btn = e.target.closest('button[data-cact]');
+  if (!btn) return;
+  const id = btn.closest('.acc').dataset.cid;
+  if (btn.dataset.cact === 'login') await act(() => call('unified_login', id));
+  if (btn.dataset.cact === 'del' && confirm('删除该账密？')) await act(() => call('delete_credential', id));
+};
+$('btn-save-redeem').onclick = async () => {
+  await call('save_settings', {
+    license_base_url: $('set-base').value.trim(),
+    card_code: $('set-card').value.trim(),
+    autostart: $('set-autostart').checked,
+    auto_schedule: $('set-auto').checked,
+    evening_schedule: $('set-evening').checked,
+  });
+  await act(() => call('redeem', $('set-card').value.trim()));
+};
+$('btn-license-refresh').onclick = () => act(() => call('refresh_license'));
+$('btn-gate-redeem').onclick = async () => {
+  await call('save_settings', { card_code: $('gate-code').value.trim() });
+  await act(() => call('redeem', $('gate-code').value.trim()));
+};
+$('btn-gate-refresh').onclick = () => act(() => call('refresh_license'));
+$('btn-clear-credits').onclick = async () => { if (confirm('清理积分记录？')) await act(() => call('clear_credits')); };
+$('btn-clear-live').onclick = async () => { if (confirm('清理实时日志？')) { await call('clear_live_logs'); $('log').innerHTML=''; } };
+$('btn-clear-runs').onclick = async () => { if (confirm('清理跑批日志？')) await act(() => call('clear_run_logs')); };
+$('btn-log-clear').onclick = async () => { await call('clear_live_logs'); $('log').innerHTML=''; };
+
+async function poll() {
+  try {
+    const r = await call('poll_logs');
+    (r.lines || []).forEach(l => logLine(l, /失败|错误|异常/.test(l) ? 'err' : 'ok'));
+  } catch (_) {}
+  setTimeout(poll, 1500);
+}
+
+window.addEventListener('pywebviewready', async () => {
+  try {
+    await refreshAll();
+    poll();
+  } catch (e) {
+    logLine(String(e), 'err');
+  }
+});
+</script>
+</body>
+</html>

@@ -7,8 +7,12 @@ a = Analysis(
     ["run_gui.py"],
     pathex=["."],
     binaries=[],
-    datas=[],
-    hiddenimports=hidden,
+    datas=[
+        ("checkin_tool/ui/index.html", "checkin_tool/ui"),
+        ("checkin_tool/ui/icon.png", "checkin_tool/ui"),
+        ("checkin_tool/ui/icon.ico", "checkin_tool/ui"),
+    ],
+    hiddenimports=hidden + ["webview", "bottle"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -29,4 +33,5 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon="assets/icon.ico",
 )

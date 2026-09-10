@@ -5,7 +5,9 @@
 ## 交付
 
 - 对外产品形态：**Windows EXE**（`dist\CheckinTool.exe`）
-- 界面：参考 Cursor 工具原生 Tk 简约布局（标题 + Tab + 底部日志）
+- 界面：PyWebView 简约白底卡片（对齐 Cursor 工具交付形态）
+- 备用：`python -m checkin_tool --native`（Tk）
+- 图标：`assets/icon.ico`
 
 ```bat
 pip install -r requirements.txt
