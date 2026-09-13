@@ -34,6 +34,62 @@ def default_auth_path() -> Path:
     return AUTH_CANDIDATES[0]
 
 
+def auth_dir() -> Path:
+    return default_auth_path().parent
+
+
+def _parse_auth_data(data: Any, source_path: str | Path) -> tuple[dict[str, Any] | None, str | None]:
+    """解析登录态 JSON；返回 (auth, err)。"""
+    if not isinstance(data, dict):
+        return None, f"登录态格式无效：{source_path}"
+    auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
+    token = auth.get("accessToken")
+    account = data.get("account") if isinstance(data.get("account"), dict) else {}
+    uid = account.get("uid")
+    if not token:
+        return None, "登录态缺少 accessToken"
+    if not uid:
+        return None, "登录态缺少 uid"
+    expires = auth.get("expiresAt", 0) or 0
+    if expires and expires < (time.time() * 1000 + 5 * 60 * 1000):
+        return None, "accessToken 已过期"
+    return {
+        "provider": "workbuddy",
+        "access_token": token,
+        "token": token,
+        "uid": str(uid),
+        "nickname": str(account.get("nickname") or ""),
+        "expires_at": expires,
+        "source_path": str(source_path),
+        "token_hint": mask_secret(token),
+    }, None
+
+
+def load_all_local_auths(auth_dir_path: str | Path | None = None) -> tuple[list[dict[str, Any]], str | None]:
+    """扫描 auth 目录下所有 workbuddy-desktop*.info（含历史备份），按 uid 去重，
+    同一 uid 取 expiresAt 最新的一条未过期登录态。"""
+    directory = Path(auth_dir_path) if auth_dir_path else auth_dir()
+    if not directory.exists():
+        return [], f"找不到登录态目录：{directory}"
+    best: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for path in sorted(directory.glob("workbuddy-desktop*.info")):
+        seen.add(str(path))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        auth, _err = _parse_auth_data(data, path)
+        if not auth:
+            continue
+        uid = auth["uid"]
+        if uid not in best or (auth.get("expires_at") or 0) > (best[uid].get("expires_at") or 0):
+            best[uid] = auth
+    if not best:
+        return [], "目录中没有有效的登录态文件，请先打开 WorkBuddy 登录"
+    return sorted(best.values(), key=lambda a: a.get("uid") or ""), None
+
+
 def load_local_auth(auth_path: str | Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
     path = Path(auth_path) if auth_path else default_auth_path()
     if not path.exists():
@@ -42,27 +98,12 @@ def load_local_auth(auth_path: str | Path | None = None) -> tuple[dict[str, Any]
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         return None, f"登录态解析失败：{exc}"
-    auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}
-    token = auth.get("accessToken")
-    account = data.get("account") if isinstance(data.get("account"), dict) else {}
-    uid = account.get("uid")
-    if not token:
-        return None, "登录态缺少 accessToken，请先打开 WorkBuddy 登录"
-    if not uid:
-        return None, "登录态缺少 uid"
-    expires = auth.get("expiresAt", 0) or 0
-    expired_soon = bool(expires and expires < (time.time() * 1000 + 5 * 60 * 1000))
-    if expired_soon:
-        return None, "accessToken 即将过期，请先打开一次 WorkBuddy 刷新登录态"
-    return {
-        "provider": "workbuddy",
-        "access_token": token,
-        "uid": str(uid),
-        "nickname": str(account.get("nickname") or ""),
-        "expires_at": expires,
-        "source_path": str(path),
-        "token_hint": mask_secret(token),
-    }, None
+    auth, err = _parse_auth_data(data, path)
+    if not auth:
+        if err == "accessToken 已过期":
+            return None, "accessToken 即将过期，请先打开一次 WorkBuddy 刷新登录态"
+        return None, err or "登录态无效"
+    return auth, None
 
 
 def _api_post(url: str, token: str, uid: str, timeout: float = 20.0) -> tuple[int, dict[str, Any]]:

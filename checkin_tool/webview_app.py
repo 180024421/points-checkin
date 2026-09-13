@@ -13,8 +13,16 @@ from . import __version__, account_store, autostart, credential_store, server_cl
 from .adapters import traework, workbuddy
 from .license_client import check_status, ensure_licensed, redeem
 from .login import login_by_id
-from .scheduler import DailyScheduler, refresh_account_credits, run_local_all
+from .scheduler import (
+    DailyScheduler,
+    refresh_account_credits,
+    refresh_server_credentials,
+    run_local_all,
+    run_workbuddy_tasks,
+    run_workbuddy_tasks_all,
+)
 from .settings import load_settings, save_settings
+from .traework_watcher import TraeWorkAutoCapture
 
 
 def _resource_path(*parts: str) -> Path:
@@ -34,6 +42,26 @@ class CheckinApi:
         if self.settings.get("auto_schedule", True):
             self.scheduler.start()
             self._append_log("已启动本机日签调度")
+        # Trae CN 只在本机保留"最后登录的那一个"账号，切号即覆盖 → 必须实时抓
+        self.traework_watch = TraeWorkAutoCapture(
+            self._on_traework_captured,
+            log=self._append_log,
+            interval=float(self.settings.get("traework_watch_interval") or 3),
+            get_user_dir=lambda: self.settings.get("traework_user_dir") or "",
+        )
+        if self.settings.get("traework_auto_capture", True):
+            self.traework_watch.start()
+            self._append_log("已启用 Trae CN 登录态自动捕获（登录后无需手动采集）")
+
+    def stop_background(self) -> None:
+        try:
+            self.traework_watch.stop()
+        except Exception:
+            pass
+        try:
+            self.scheduler.stop()
+        except Exception:
+            pass
 
     def _append_log(self, msg: str) -> None:
         text = str(msg).rstrip()
@@ -56,7 +84,12 @@ class CheckinApi:
                 "autostart": bool(self.settings.get("autostart")),
                 "auto_schedule": bool(self.settings.get("auto_schedule", True)),
                 "evening_schedule": bool(self.settings.get("evening_schedule", True)),
+                "traework_auto_capture": bool(self.settings.get("traework_auto_capture", True)),
+                "traework_user_dir": self.settings.get("traework_user_dir") or "",
+                "workbuddy_task_mode": self.settings.get("workbuddy_task_mode") or "off",
+                "workbuddy_chat_tasks": bool(self.settings.get("workbuddy_chat_tasks", True)),
             },
+            "traework_watch": self.traework_watch.status(),
             "license": license_info,
             "board": account_store.today_board(),
             "accounts": self.list_accounts().get("accounts") or [],
@@ -105,6 +138,11 @@ class CheckinApi:
             "autostart",
             "auto_schedule",
             "evening_schedule",
+            "traework_auto_capture",
+            "traework_user_dir",
+            "traework_ug_api_base",
+            "workbuddy_task_mode",
+            "workbuddy_chat_tasks",
         ):
             if key in payload:
                 self.settings[key] = payload[key]
@@ -117,6 +155,13 @@ class CheckinApi:
             self.scheduler.start()
         else:
             self.scheduler.stop()
+        # Trae 自动捕获开关即时生效
+        if self.settings.get("traework_auto_capture", True):
+            if not self.traework_watch.running:
+                self.traework_watch.start()
+                self._append_log("已启用 Trae CN 登录态自动捕获")
+        else:
+            self.traework_watch.stop()
         return {"ok": True, "message": "设置已保存"}
 
     def redeem(self, card_code: str = "") -> dict[str, Any]:
@@ -133,48 +178,204 @@ class CheckinApi:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
             return {"ok": False, "message": msg}
-        auth, err = workbuddy.load_local_auth(self.settings.get("workbuddy_auth_path") or None)
-        if err or not auth:
+        custom_path = self.settings.get("workbuddy_auth_path")
+        if custom_path:
+            auth, err = workbuddy.load_local_auth(custom_path)
+            auths = [auth] if auth else []
+        else:
+            auths, err = workbuddy.load_all_local_auths()
+        if not auths:
             return {"ok": False, "message": err or "无登录态"}
-        account_store.upsert_account(
-            {
-                "provider": "workbuddy",
-                "label": auth.get("nickname") or auth.get("uid"),
-                "identity": auth.get("uid"),
-                "run_mode": "local",
-                "enabled": True,
-                "token_blob": auth,
-                "last_error": "",
-            }
-        )
-        self._append_log(f"已采集 WorkBuddy：{auth.get('nickname') or auth.get('uid')}")
-        return {"ok": True, "message": "采集成功"}
+        labels = []
+        for auth in auths:
+            account_store.upsert_account(
+                {
+                    "provider": "workbuddy",
+                    "label": auth.get("nickname") or auth.get("uid"),
+                    "identity": auth.get("uid"),
+                    "run_mode": "local",
+                    "enabled": True,
+                    "token_blob": auth,
+                    "last_error": "",
+                }
+            )
+            labels.append(auth.get("nickname") or auth.get("uid"))
+        self._append_log(f"已采集 WorkBuddy {len(auths)} 个账号：{', '.join(str(x) for x in labels)}")
+        return {"ok": True, "message": f"采集成功（{len(auths)} 个账号）", "count": len(auths)}
+
+    def _store_traework_auths(self, auths: list[dict[str, Any]]) -> dict[str, Any]:
+        """把 TraeWork 登录态写入账号库（按 userId 累加，不会覆盖已采账号）。"""
+        tags = traework.user_tags()
+        saved: list[str] = []
+        identities: list[str] = []
+        stored = 0
+        need_token = False
+        enabled_count = 0
+        for auth in auths:
+            blocked = traework._blocked_region(auth) if auth.get("token") else ""
+            if blocked:
+                note = f"区域 {blocked}，签到仅支持 CN 区，已停用"
+            elif not auth.get("token"):
+                note = "设备头已读到，但 token 需粘贴"
+                need_token = True
+            else:
+                note = ""
+                enabled_count += 1
+            if self.settings.get("traework_ug_api_base"):
+                auth["ug_api_base"] = self.settings["traework_ug_api_base"]
+            uid = str(auth.get("user_id") or "")
+            if uid and tags.get(uid):
+                auth["user_tag"] = tags[uid]
+            if auth.get("needs_manual_token") and not auth.get("token"):
+                continue  # 无 token 的占位项不入库，避免账号列表出现空账号
+            account_store.upsert_account(
+                {
+                    "provider": "traework",
+                    "label": auth.get("user_id") or auth.get("nickname") or "traework",
+                    "identity": auth.get("user_id") or auth.get("auth_key") or "traework",
+                    "run_mode": "local",
+                    "enabled": bool(auth.get("token")) and not blocked,
+                    "token_blob": auth,
+                    "last_error": note,
+                }
+            )
+            stored += 1
+            identities.append(str(auth.get("user_id") or auth.get("auth_key") or "traework"))
+            saved.append(f"{uid or '未知'}({auth.get('user_region') or '?'})" + (f" {note}" if note else ""))
+        return {
+            "stored": stored,
+            "enabled_count": enabled_count,
+            "need_token": need_token,
+            "saved": saved,
+            "identities": identities,
+        }
+
+    def _on_traework_captured(self, auths: list[dict[str, Any]], reason: str) -> None:
+        """实时捕获回调：Trae 登录/切号后立即落库。"""
+        ok, msg = ensure_licensed(self.settings, force_online=False)
+        if not ok:
+            return
+        stat = self._store_traework_auths(auths)
+        if stat["stored"]:
+            self._append_log(
+                f"[Trae自动采集] {reason} → 已入库 {stat['stored']} 个账号：{', '.join(stat['saved'])}"
+            )
+            # 代跑账号：刚拿到的就是最新 token，顺带回传服务器
+            self._sync_server_for(stat["identities"])
+
+    def _sync_server_for(self, identities: list[str], *, force: bool = False) -> None:
+        """把这些账号里处于「代跑模式」的最新凭证回传服务器。"""
+        wanted = {str(i) for i in (identities or []) if i}
+        if not wanted:
+            return
+        for account in account_store.load_accounts():
+            if str(account.get("run_mode") or "local") != "server":
+                continue
+            if str(account.get("identity") or "") not in wanted:
+                continue
+            try:
+                server_client.sync_server_blob(account, log=self._append_log, force=force)
+            except Exception as exc:  # noqa: BLE001
+                self._append_log(f"代跑凭证同步异常：{exc}")
 
     def capture_traework(self) -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
             return {"ok": False, "message": msg}
-        auth, err = traework.load_local_auth(self.settings.get("traework_user_dir") or None)
-        if not auth:
+        custom_dir = self.settings.get("traework_user_dir")
+        auths, err = traework.load_all_local_auths(custom_dir or None)
+        if not auths:
             return {"ok": False, "message": err or "无登录态"}
-        note = ""
-        if not auth.get("token"):
-            note = "设备头已读到，但 token 需粘贴"
-        if self.settings.get("traework_ug_api_base"):
-            auth["ug_api_base"] = self.settings["traework_ug_api_base"]
-        account_store.upsert_account(
-            {
-                "provider": "traework",
-                "label": auth.get("user_id") or "traework",
-                "identity": auth.get("user_id") or auth.get("auth_key") or "traework",
-                "run_mode": "local",
-                "enabled": bool(auth.get("token")),
-                "token_blob": auth,
-                "last_error": "" if auth.get("token") else (err or "缺少 token"),
-            }
+
+        known = traework.known_user_ids()
+        collected = {str(a.get("user_id") or "") for a in auths if a.get("user_id")}
+        missing = [uid for uid in known if uid not in collected]
+
+        stat = self._store_traework_auths(auths)
+        if not stat["stored"]:
+            return {"ok": False, "message": err or "未找到可解密的 Trae 登录态，请先登录 Trae CN 桌面端"}
+        self._append_log(f"已采集 TraeWork {stat['stored']} 个账号：{', '.join(stat['saved'])}")
+        self._sync_server_for(stat["identities"])
+        if missing:
+            self._append_log(
+                f"本机还登录过 {len(missing)} 个账号但只剩记录、无 token：{', '.join(missing)}；"
+                f"Trae 只保留最后登录的那个账号，历史 token 已被覆盖，需重新登录一次由自动捕获入库"
+            )
+        return {
+            "ok": True,
+            "message": (
+                f"采集成功（{stat['stored']} 个账号，{stat['enabled_count']} 个可签到）"
+                + (
+                    f"；本机还检测到 {len(missing)} 个曾登录但当前无登录态的账号"
+                    f"（{', '.join(missing)}）：其 token 已被 Trae 覆盖、无法补采，"
+                    "请在 Trae CN 里重新登录一次这些账号，自动捕获会即时入库"
+                    if missing
+                    else ""
+                )
+            ),
+            "count": stat["stored"],
+            "missing": missing,
+            "need_token": stat["need_token"],
+        }
+
+    def diagnose_traework(self) -> dict[str, Any]:
+        """Trae CN 登录态体检：目录、键、可解密情况、缺哪个账号。"""
+        try:
+            report = traework.diagnose_local_auth(self.settings.get("traework_user_dir") or None)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "message": f"体检失败: {exc}", "details": [str(exc)]}
+        details = list(report.get("details") or [])
+        watch = self.traework_watch.status()
+        details.append(
+            f"自动捕获：{'运行中' if watch['running'] else '已停止'}，"
+            f"累计入库 {watch['captured']} 次"
+            + (f"，最近 {watch['last_at']}：{watch['last_message']}" if watch.get("last_at") else "")
         )
-        self._append_log("已采集 TraeWork" + (f"（{note}）" if note else ""))
-        return {"ok": True, "message": note or "采集成功", "need_token": not bool(auth.get("token"))}
+        self._append_log(
+            f"[Trae体检] 数据目录 {len(report.get('dirs') or [])} 个；"
+            f"可提取 {len(report.get('collected') or [])} 个账号；"
+            f"仅剩记录（token 已被覆盖） {len(report.get('missing') or [])} 个"
+        )
+        if report.get("missing"):
+            self._append_log(f"[Trae体检] 已被覆盖的账号：{', '.join(report['missing'])}")
+        return {
+            "ok": bool(report.get("ok")),
+            "message": (
+                f"可提取 {len(report.get('collected') or [])} 个账号；"
+                f"{len(report.get('missing') or [])} 个历史账号只剩记录（token 已被覆盖）"
+            ),
+            "report": report,
+            "watch": watch,
+            "details": details,
+        }
+
+    def traework_watch_status(self) -> dict[str, Any]:
+        return {"ok": True, "watch": self.traework_watch.status()}
+
+    def notices(self) -> dict[str, Any]:
+        """拉取服务器未读通知（账号异常 + 运营公告），前端据此弹窗。"""
+        try:
+            res = server_client.fetch_notices()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "items": [], "message": str(exc)}
+        data = res.get("data")
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            items = []
+        return {"ok": bool(res.get("ok")), "items": items, "message": res.get("message") or ""}
+
+    def ack_notices(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """标记通知已读（之后不再弹窗）。"""
+        payload = payload or {}
+        keys = [str(k) for k in (payload.get("keys") or [])]
+        all_read = bool(payload.get("all"))
+        try:
+            res = server_client.ack_notices(keys, all_read=all_read)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "message": str(exc)}
+        if res.get("ok") and (keys or all_read):
+            self._append_log(f"已读通知 {len(keys) if keys else '全部'}")
+        return {"ok": bool(res.get("ok")), "message": res.get("message") or "", "data": res.get("data")}
 
     def paste_trae_token(self, token: str = "", user_id: str = "") -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=True)
@@ -342,12 +543,70 @@ class CheckinApi:
                     self._append_log(f"跳过无 token 账号 {account.get('id')}")
                     continue
                 account["run_mode"] = "server"
+                if str(account.get("provider")) == "workbuddy":
+                    # 告诉服务器：这个账号代跑时要不要顺带做成长任务
+                    account["task_enabled"] = self.settings.get("workbuddy_task_mode") == "server"
                 account_store.upsert_account(account)
-                result = server_client.upsert_server_account(account)
-                self._append_log(f"上传代跑 {account.get('provider')}: {result.get('message') or result}")
+                result = server_client.sync_server_blob(account, log=self._append_log, force=True)
+                if not result:
+                    self._append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")
 
         self._bg(worker)
         return {"ok": True, "message": "正在上传代跑"}
+
+    def sync_server_credentials(self) -> dict[str, Any]:
+        """手动触发一次「代跑凭证保鲜」：本机续期后回传服务器。"""
+        ok, msg = ensure_licensed(self.settings, force_online=False)
+        if not ok:
+            return {"ok": False, "message": msg}
+
+        def worker() -> None:
+            results = refresh_server_credentials(log=self._append_log)
+            if not results:
+                self._append_log("没有处于代跑模式的账号")
+                return
+            synced = sum(1 for r in results if r.get("synced"))
+            refreshed = sum(1 for r in results if r.get("token_refreshed"))
+            self._append_log(
+                f"代跑凭证同步完成：检查 {len(results)} 个账号，刷新 token {refreshed} 个，回传 {synced} 个"
+            )
+
+        self._bg(worker)
+        return {"ok": True, "message": "正在同步代跑凭证"}
+
+    def run_workbuddy_tasks(self, account_id: str = "") -> dict[str, Any]:
+        """立即执行 WorkBuddy 成长中心任务（本机模式）。"""
+        ok, msg = ensure_licensed(self.settings, force_online=False)
+        if not ok:
+            return {"ok": False, "message": msg}
+        mode = self.settings.get("workbuddy_task_mode") or "off"
+        if mode == "server":
+            return {
+                "ok": False,
+                "message": "当前是「服务器代跑」模式，任务由服务器在每日代跑时执行，本机不重复跑",
+            }
+
+        def worker() -> None:
+            if account_id:
+                accounts = account_store.load_accounts()
+                target = next(
+                    (a for a in accounts if str(a.get("id")) == str(account_id)), None
+                )
+                if not target:
+                    self._append_log("未找到该账号")
+                    return
+                result = run_workbuddy_tasks(target, log=self._append_log, force=True)
+                self._append_log(result.get("message") or str(result))
+                return
+            results = run_workbuddy_tasks_all(log=self._append_log, force=True)
+            if not results:
+                self._append_log("没有可执行的 WorkBuddy 账号（需为本机模式且已启用）")
+                return
+            done = sum(1 for r in results if r.get("ok"))
+            self._append_log(f"成长任务执行完成：{done}/{len(results)} 个账号")
+
+        self._bg(worker)
+        return {"ok": True, "message": "正在执行 WorkBuddy 成长任务"}
 
     def run_server_now(self) -> dict[str, Any]:
         def worker() -> None:
@@ -411,10 +670,13 @@ def main() -> None:
     if icon_path.exists():
         start_kwargs["icon"] = str(icon_path)
     try:
-        webview.start(**start_kwargs)
-    except TypeError:  # 旧版本 pywebview 不支持 icon 参数
-        start_kwargs.pop("icon", None)
-        webview.start(**start_kwargs)
+        try:
+            webview.start(**start_kwargs)
+        except TypeError:  # 旧版本 pywebview 不支持 icon 参数
+            start_kwargs.pop("icon", None)
+            webview.start(**start_kwargs)
+    finally:
+        api.stop_background()
 
 
 if __name__ == "__main__":

@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
-"""run-jane 代跑 API 客户端（卡密 + 设备指纹）。"""
+"""run-jane 代跑 API 客户端（卡密 + 设备指纹）。
+
+另外负责「代跑凭证保鲜」：服务端 worker 只用上传时的 access_token 打接口，
+不会自己续期；所以本机一旦把 token 刷新成功，就要把最新 tokenBlob 回传，
+否则到期后服务端会一直签到失败。
+"""
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from . import account_store
 from .license_client import auth_headers, license_cfg_from_settings, load_cache
 from .settings import load_settings
+
+LogFn = Callable[[str], None]
 
 
 def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -69,8 +78,50 @@ def upsert_server_account(account: dict[str, Any]) -> dict[str, Any]:
             "tokenBlob": blob,
             "enabled": bool(account.get("enabled", True)),
             "clientAccountId": account.get("id"),
+            # WorkBuddy：服务器代跑时是否顺带执行成长中心任务
+            "taskEnabled": bool(account.get("task_enabled")),
         },
     )
+
+
+def token_fingerprint(account: dict[str, Any]) -> str:
+    """当前 token 的指纹，用于判断相对上次上传是否有变化。"""
+    blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
+    return str(blob.get("token_hint") or blob.get("access_token") or blob.get("token") or "")
+
+
+def sync_server_blob(
+    account: dict[str, Any],
+    *,
+    log: LogFn | None = None,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """代跑账号：本机 token 有更新就回传服务器，避免服务端 token 过期后一直失败。
+
+    返回 None 表示无需同步（非代跑模式 / 无 token / token 与上次一致）。
+    调用方传入的必须是账号库里的完整记录，同步成功后会把指纹回写落库。
+    """
+    if str(account.get("run_mode") or "local") != "server":
+        return None
+    blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
+    if not (blob.get("token") or blob.get("access_token")):
+        return None
+    fp = token_fingerprint(account)
+    if not force and fp and str(account.get("server_synced_hint") or "") == fp:
+        return None
+
+    label = account.get("label") or account.get("id")
+    result = upsert_server_account(account)
+    if result.get("ok"):
+        account["server_synced_hint"] = fp
+        account["server_synced_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if account.get("id"):
+            account_store.upsert_account(account)
+        if log:
+            log(f"代跑凭证已同步服务器：{label}")
+    elif log:
+        log(f"代跑凭证同步失败（{label}）：{result.get('message')}")
+    return result
 
 
 def list_server_accounts() -> dict[str, Any]:
@@ -91,3 +142,13 @@ def today_runs() -> dict[str, Any]:
 
 def run_now_server() -> dict[str, Any]:
     return _post("/runs/run-now", {})
+
+
+def fetch_notices() -> dict[str, Any]:
+    """拉取未读站内通知（账号异常 + 运营公告），供客户端弹窗提醒。"""
+    return _post("/notices", {})
+
+
+def ack_notices(keys: list[str] | None = None, *, all_read: bool = False) -> dict[str, Any]:
+    """把通知标记为已读（之后不再弹窗）。"""
+    return _post("/notices/ack", {"noticeKeys": [str(k) for k in (keys or [])], "all": bool(all_read)})

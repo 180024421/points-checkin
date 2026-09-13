@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,10 @@ ACCOUNTS_FILE = data_root() / "accounts.json"
 RUN_LOG_FILE = data_root() / "run_log.json"
 LIVE_LOG_FILE = data_root() / "live_log.json"
 CREDIT_HISTORY_FILE = data_root() / "credit_history.json"
+
+# UI 线程与后台线程（自动采集 / 调度）都会读改写这些文件，
+# 锁保证 read-modify-write 不丢数据（例如两个账号同时入库）。
+_IO_LOCK = threading.RLock()
 
 
 def _now() -> str:
@@ -48,6 +53,11 @@ def account_identity_key(account: dict[str, Any]) -> str:
 
 
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
+    with _IO_LOCK:
+        return _upsert_account(account)
+
+
+def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
     accounts = load_accounts()
     identity = account_identity_key(account)
     account["identity"] = identity.split(":", 1)[-1] if ":" in identity else identity
@@ -86,12 +96,13 @@ def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
 
 
 def delete_account(account_id: str) -> bool:
-    accounts = load_accounts()
-    new_rows = [a for a in accounts if str(a.get("id")) != account_id]
-    if len(new_rows) == len(accounts):
-        return False
-    save_accounts(new_rows)
-    return True
+    with _IO_LOCK:
+        accounts = load_accounts()
+        new_rows = [a for a in accounts if str(a.get("id")) != account_id]
+        if len(new_rows) == len(accounts):
+            return False
+        save_accounts(new_rows)
+        return True
 
 
 def public_account_view(account: dict[str, Any], today_map: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -121,18 +132,19 @@ def public_account_view(account: dict[str, Any], today_map: dict[str, dict[str, 
 
 
 def append_run_log(entry: dict[str, Any]) -> None:
-    data = load_json(RUN_LOG_FILE, {"runs": []})
-    runs = data.get("runs") if isinstance(data, dict) else []
-    if not isinstance(runs, list):
-        runs = []
-    entry = {
-        **entry,
-        "at": entry.get("at") or _now(),
-        "day": entry.get("day") or _today_local(),
-    }
-    runs.insert(0, entry)
-    runs = runs[:1000]
-    save_json(RUN_LOG_FILE, {"runs": runs})
+    with _IO_LOCK:
+        data = load_json(RUN_LOG_FILE, {"runs": []})
+        runs = data.get("runs") if isinstance(data, dict) else []
+        if not isinstance(runs, list):
+            runs = []
+        entry = {
+            **entry,
+            "at": entry.get("at") or _now(),
+            "day": entry.get("day") or _today_local(),
+        }
+        runs.insert(0, entry)
+        runs = runs[:1000]
+        save_json(RUN_LOG_FILE, {"runs": runs})
 
 
 def load_run_logs(limit: int = 200) -> list[dict[str, Any]]:
@@ -148,13 +160,14 @@ def clear_run_logs() -> None:
 
 
 def append_live_log(message: str) -> None:
-    data = load_json(LIVE_LOG_FILE, {"lines": []})
-    lines = data.get("lines") if isinstance(data, dict) else []
-    if not isinstance(lines, list):
-        lines = []
-    lines.insert(0, {"at": datetime.now().strftime("%H:%M:%S"), "message": message})
-    lines = lines[:800]
-    save_json(LIVE_LOG_FILE, {"lines": lines})
+    with _IO_LOCK:
+        data = load_json(LIVE_LOG_FILE, {"lines": []})
+        lines = data.get("lines") if isinstance(data, dict) else []
+        if not isinstance(lines, list):
+            lines = []
+        lines.insert(0, {"at": datetime.now().strftime("%H:%M:%S"), "message": message})
+        lines = lines[:800]
+        save_json(LIVE_LOG_FILE, {"lines": lines})
 
 
 def load_live_logs(limit: int = 300) -> list[dict[str, Any]]:
@@ -170,13 +183,14 @@ def clear_live_logs() -> None:
 
 
 def append_credit_history(entry: dict[str, Any]) -> None:
-    data = load_json(CREDIT_HISTORY_FILE, {"items": []})
-    items = data.get("items") if isinstance(data, dict) else []
-    if not isinstance(items, list):
-        items = []
-    items.insert(0, {**entry, "at": entry.get("at") or _now(), "day": entry.get("day") or _today_local()})
-    items = items[:2000]
-    save_json(CREDIT_HISTORY_FILE, {"items": items})
+    with _IO_LOCK:
+        data = load_json(CREDIT_HISTORY_FILE, {"items": []})
+        items = data.get("items") if isinstance(data, dict) else []
+        if not isinstance(items, list):
+            items = []
+        items.insert(0, {**entry, "at": entry.get("at") or _now(), "day": entry.get("day") or _today_local()})
+        items = items[:2000]
+        save_json(CREDIT_HISTORY_FILE, {"items": items})
 
 
 def load_credit_history(account_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:

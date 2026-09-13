@@ -60,6 +60,57 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
+def _stable_machine_id() -> str:
+    """本机稳定标识：Windows MachineGuid → 物理 MAC；都取不到时返回空字符串。
+
+    用于保证重装 / 升级 / 删除数据目录后仍是“同一台设备”，
+    避免服务端把同一台机器重复计入设备数（maxDevices）。
+    """
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
+            ) as key:
+                value = winreg.QueryValueEx(key, "MachineGuid")[0]
+                text = str(value).strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+    try:
+        mac = uuid.getnode()
+        if mac and not (mac >> 40) & 0x01:  # 非随机 MAC
+            return uuid.UUID(int=mac).hex[-12:]
+    except Exception:
+        pass
+    return ""
+
+
+def _restored_device_id() -> str:
+    for directory in _backup_dirs():
+        path = directory / "device_id.txt"
+        if not path.exists():
+            continue
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except Exception:
+            continue
+    return ""
+
+
+def _mirror_device_id(mid: str) -> None:
+    for directory in _backup_dirs():
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "device_id.txt").write_text(mid + "\n", encoding="utf-8")
+        except Exception:
+            continue
+
+
 def device_fingerprint() -> str:
     DEVICE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
     mid = ""
@@ -69,11 +120,15 @@ def device_fingerprint() -> str:
         except Exception:
             mid = ""
     if not mid:
-        mid = str(uuid.uuid4())
+        # 1) 异地备份（重装后恢复原设备身份，不额外占用设备数）
+        # 2) 本机稳定标识（MachineGuid / MAC）
+        # 3) 随机 UUID（兜底）
+        mid = _restored_device_id() or _stable_machine_id() or str(uuid.uuid4())
         try:
             DEVICE_ID_FILE.write_text(mid + "\n", encoding="utf-8")
         except Exception:
             pass
+        _mirror_device_id(mid)
     host = platform.node() or socket.gethostname() or "host"
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
     system = platform.system() or "OS"
@@ -84,27 +139,71 @@ def device_name() -> str:
     return f"{platform.node() or 'PC'} ({platform.system()})"
 
 
-def load_cache() -> dict[str, Any]:
-    if not LICENSE_CACHE.exists():
-        return {}
+def _backup_dirs() -> list[Path]:
+    """异地备份目录：重装或删除数据目录后仍保留。"""
+    dirs: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        dirs.append(Path(local) / "CheckinTool")
     try:
-        data = secure_load_json(LICENSE_CACHE, {})
-        return data if isinstance(data, dict) else {}
+        dirs.append(Path.home() / ".checkintool")
     except Exception:
-        return {}
+        pass
+    return dirs
+
+
+def _backup_files() -> list[Path]:
+    """卡密/票据的异地备份位置，保证重装或删除数据目录后仍可恢复。"""
+    return [d / "license_cache.json" for d in _backup_dirs()]
+
+
+def _restore_cache_from_backup() -> dict[str, Any]:
+    for path in _backup_files():
+        if not path.exists():
+            continue
+        try:
+            data = secure_load_json(path, {})
+        except Exception:
+            continue
+        if isinstance(data, dict) and data:
+            try:  # 恢复回主目录
+                LICENSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                secure_save_json(LICENSE_CACHE, data)
+            except Exception:
+                pass
+            return data
+    return {}
+
+
+def load_cache() -> dict[str, Any]:
+    if LICENSE_CACHE.exists():
+        try:
+            data = secure_load_json(LICENSE_CACHE, {})
+            if isinstance(data, dict) and data:
+                return data
+        except Exception:
+            pass
+    return _restore_cache_from_backup()
 
 
 def save_cache(data: dict[str, Any]) -> None:
     LICENSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
     secure_save_json(LICENSE_CACHE, data)
+    for path in _backup_files():  # 异地镜像，重装后自动找回
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            secure_save_json(path, data)
+        except Exception:
+            continue
 
 
 def clear_cache() -> None:
-    if LICENSE_CACHE.exists():
-        try:
-            LICENSE_CACHE.unlink()
-        except Exception:
-            pass
+    for path in [LICENSE_CACHE, *_backup_files()]:
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
 
 
 def _normalize_base(url: str) -> str:
@@ -189,18 +288,18 @@ def _post_plain(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any
 
 
 def _post_json(url: str, body: dict[str, Any], timeout: float, scope: str, prefer_crypto: bool) -> dict[str, Any]:
-    if prefer_crypto:
-        try:
-            from .crypto_transport import CryptoTransportError, secure_json_request
+    # 服务端敏感接口已强制要求加密信封，始终优先走加密通道，失败时回退明文以兼容旧服务端。
+    try:
+        from .crypto_transport import CryptoTransportError, secure_json_request
 
-            return secure_json_request(url, body, scope, timeout)
-        except Exception as exc:
-            # 回退明文
-            plain = _post_plain(url, body, timeout)
+        return secure_json_request(url, body, scope, timeout)
+    except Exception as exc:
+        plain = _post_plain(url, body, timeout)
+        if prefer_crypto:
             if plain.get("code") in (200, 0, "200", "0") or isinstance(plain.get("data"), dict):
                 return plain
             return {"code": -1, "message": f"加密通道失败且明文失败: {exc}"}
-    return _post_plain(url, body, timeout)
+        return plain
 
 
 def _cache_from_data(data: dict[str, Any], app_key: str) -> dict[str, Any]:
@@ -276,6 +375,10 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
     )
     ok, msg, data = _unwrap(resp)
     if not ok:
+        # 票据失效（过期 / 设备变更 / 重装）：用已保存的卡密静默重新激活
+        renewed = _auto_renew(cfg, cache, fp, public_cfg)
+        if renewed:
+            return renewed
         if ticket_still_valid(cache):
             return {
                 "ok": True,
@@ -297,12 +400,50 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
         }
 
     cached = _cache_from_data(data, cfg["app_key"])
+    if cache.get("primaryCard"):
+        cached["primaryCard"] = cache["primaryCard"]  # 保卡密，供下次自动续期
     save_cache(cached)
     return {
         "ok": True,
         "valid": bool(data.get("valid")),
         "message": data.get("message") or msg or ("授权有效" if data.get("valid") else "未激活"),
         "license": cached,
+        "deviceFingerprint": fp,
+        "cfg": public_cfg,
+    }
+
+
+def _auto_renew(
+    cfg: dict[str, Any],
+    cache: dict[str, Any],
+    fp: str,
+    public_cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    """用本地已保存的卡密重新激活；成功返回 check_status 风格结果，否则 None。"""
+    card = str(cache.get("primaryCard") or "").strip()
+    if not card:
+        return None
+    try:
+        result = redeem(
+            {
+                "license_base_url": cfg["base_url"],
+                "license_app_key": cfg["app_key"],
+                "license_timeout": cfg["timeout"],
+                "prefer_crypto": cfg["prefer_crypto"],
+            },
+            card,
+        )
+    except Exception:
+        return None
+    if not result.get("ok"):
+        return None
+    license_cache = result.get("license") or load_cache()
+    return {
+        "ok": True,
+        "valid": bool(license_cache.get("valid")),
+        "renewed": True,
+        "message": result.get("message") or "已用本地卡密自动续期",
+        "license": license_cache,
         "deviceFingerprint": fp,
         "cfg": public_cfg,
     }
@@ -335,6 +476,7 @@ def redeem(settings: dict[str, Any], card_code: str) -> dict[str, Any]:
     cached = _cache_from_data(data, cfg["app_key"])
     if "valid" not in data:
         cached["valid"] = True
+    cached["primaryCard"] = code  # 记住卡密，后续自动续期，无需再次填写
     save_cache(cached)
     return {
         "ok": True,

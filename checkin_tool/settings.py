@@ -30,6 +30,13 @@ def default_settings() -> dict[str, Any]:
         "workbuddy_auth_path": "",
         "traework_user_dir": "",
         "traework_ug_api_base": "",
+        # Trae CN 只保留最后登录的那个账号，切号即覆盖 → 默认开启实时捕获
+        "traework_auto_capture": True,
+        "traework_watch_interval": 3,
+        # WorkBuddy 成长中心任务：off=不做 / local=本机做 / server=服务器代跑
+        "workbuddy_task_mode": "off",
+        # 是否执行需要真实 AI 对话的任务（和AI聊天5次 / GLM对话 / 专家团 / 夜猫子）
+        "workbuddy_chat_tasks": True,
     }
 
 

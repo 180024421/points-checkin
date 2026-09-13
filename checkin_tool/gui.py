@@ -650,30 +650,42 @@ class CheckinApp(tk.Tk):
         if not ok:
             messagebox.showerror("卡密", msg)
             return
-        auth, err = traework.load_local_auth(self.settings.get("traework_user_dir") or None)
-        if not auth:
-            messagebox.showerror("采集失败", err or "无登录态")
-            return
-        if not auth.get("token"):
+        auths, err = traework.load_all_local_auths(self.settings.get("traework_user_dir") or None)
+        todo = [a for a in auths if a.get("token")]
+        if not todo:
             messagebox.showwarning(
                 "无法自动解密 token",
-                (err or "Electron safeStorage 密文暂无法自动解开")
-                + "\n请切到已登录账号后使用「粘贴 Trae token」。",
+                (err or "未找到可解密的 iCubeAuthInfo")
+                + "\n请在 Trae CN 里登录一次（登录瞬间会自动入库），或使用「粘贴 Trae token」。",
             )
-        if self.settings.get("traework_ug_api_base"):
-            auth["ug_api_base"] = self.settings["traework_ug_api_base"]
-        account_store.upsert_account(
-            {
-                "provider": "traework",
-                "label": auth.get("user_id") or "traework",
-                "identity": auth.get("user_id") or auth.get("auth_key") or "traework",
-                "run_mode": "local",
-                "enabled": bool(auth.get("token")),
-                "token_blob": auth,
-                "last_error": "" if auth.get("token") else (err or "缺少 token"),
-            }
+            return
+        tags = traework.user_tags()
+        saved: list[str] = []
+        for auth in todo:
+            if self.settings.get("traework_ug_api_base"):
+                auth["ug_api_base"] = self.settings["traework_ug_api_base"]
+            uid = str(auth.get("user_id") or "")
+            if uid and tags.get(uid):
+                auth["user_tag"] = tags[uid]
+            account_store.upsert_account(
+                {
+                    "provider": "traework",
+                    "label": uid or auth.get("nickname") or "traework",
+                    "identity": uid or auth.get("auth_key") or "traework",
+                    "run_mode": "local",
+                    "enabled": True,
+                    "token_blob": auth,
+                    "last_error": "",
+                }
+            )
+            saved.append(uid or "未知")
+        known = traework.known_user_ids()
+        collected = {str(a.get("user_id") or "") for a in todo}
+        missing = [u for u in known if u not in collected]
+        self.append_log(
+            f"已采集 TraeWork {len(todo)} 个账号：{', '.join(saved)}"
+            + (f"；另有 {len(missing)} 个历史账号 token 已被覆盖，需重新登录一次" if missing else "")
         )
-        self.append_log("已采集 TraeWork（无 token 时请粘贴）")
         self.refresh_accounts()
 
     def set_mode(self, mode: str) -> None:
@@ -740,8 +752,9 @@ class CheckinApp(tk.Tk):
                     continue
                 account["run_mode"] = "server"
                 account_store.upsert_account(account)
-                result = server_client.upsert_server_account(account)
-                self.append_log(f"上传代跑 {account.get('provider')}: {result.get('message') or result}")
+                result = server_client.sync_server_blob(account, log=self.append_log, force=True)
+                if not result:
+                    self.append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")
             self.after(0, self.refresh_accounts)
 
         threading.Thread(target=worker, daemon=True).start()

@@ -368,7 +368,7 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
       </div>
       <div class="card">
         <div class="card-head"><span class="bar"></span><h2>入池方式</h2></div>
-        <p class="hint">官方客户端登录后采集 / 粘贴 token；或导入账密统一登录（优先 API，失败再开浏览器）。账密本机加密，代跑只上传 token。</p>
+        <p class="hint">官方客户端登录后采集 / 粘贴 token；或导入账密统一登录（优先 API，失败再开浏览器）。账密本机加密，代跑只上传 token。Trae CN 登录态会在登录瞬间自动入库（设置页可开关）。</p>
         <div class="row gap-md">
           <button id="btn-import-cred">导入账密</button>
           <button id="btn-login-all">统一登录</button>
@@ -390,6 +390,8 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
           <button class="sm" id="btn-cap-tw-2">采集 TraeWork</button>
           <button class="sm" id="btn-paste-tw-2">粘贴 token</button>
           <button class="sm" id="btn-upload">上传代跑</button>
+          <button class="sm" id="btn-sync-server">同步代跑凭证</button>
+          <button class="sm" id="btn-wb-tasks">执行 WorkBuddy 任务</button>
         </div>
       </div>
       <div class="card">
@@ -443,6 +445,21 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
           <label class="chk"><input type="checkbox" id="set-autostart"> 开机自启</label>
           <label class="chk"><input type="checkbox" id="set-auto"> 早晚调度</label>
           <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
+          <label class="chk"><input type="checkbox" id="set-trae-capture"> 自动捕获 Trae CN 登录</label>
+        </div>
+        <div class="row gap-md" style="align-items:center">
+          <span class="label" style="margin:0">WorkBuddy 成长任务</span>
+          <select id="set-wb-mode" style="max-width:220px">
+            <option value="off">关闭</option>
+            <option value="local">本机执行</option>
+            <option value="server">服务器代跑</option>
+          </select>
+          <label class="chk"><input type="checkbox" id="set-wb-chat"> 含 AI 对话任务</label>
+        </div>
+        <p class="hint">成长任务：召唤专家、模板、聊天、抽奖、盲盒、派猫猫旅行、连签兑换等，只补未完成项，重复运行不会重复领取。选「服务器代跑」后需重新点一次「上传代跑」才会生效。</p>
+        <p class="hint" id="trae-watch-hint">Trae CN 在本机只保留「最后登录的那一个」账号，切号会覆盖旧登录态；开启后每次登录都会自动入库，无需手动采集。</p>
+        <div class="row gap-md">
+          <button class="sm" id="btn-diagnose-trae">检测 Trae CN 登录态</button>
         </div>
         <div class="row gap-md">
           <button class="sm" id="btn-clear-live">清理实时日志</button>
@@ -452,9 +469,23 @@ label.chk input{width:auto;accent-color:var(--brand);margin:0}
     </section>
   </main>
 
+<!-- 公告 / 账号异常通知 -->
+<div class="modal" id="notice-modal">
+  <div class="panel-box">
+    <div class="mark" id="notice-mark">!</div>
+    <h2 id="notice-title">通知</h2>
+    <p class="lead" id="notice-body" style="white-space:pre-wrap;max-height:280px;overflow:auto"></p>
+    <div class="row gap-md" style="justify-content:flex-end">
+      <button class="sm ghost" id="btn-notice-later">稍后再说</button>
+      <button class="sm" id="btn-notice-ok">知道了</button>
+    </div>
+  </div>
+</div>
+
   <div class="logbar-wrap">
     <div class="logbar-head">
       <span class="label" style="margin:0">运行日志</span>
+
       <div class="spacer"></div>
       <button class="sm ghost" id="btn-log-clear">清理</button>
     </div>
@@ -586,6 +617,19 @@ function applySettings(s) {
   $('set-autostart').checked = !!s.autostart;
   $('set-auto').checked = s.auto_schedule !== false;
   $('set-evening').checked = s.evening_schedule !== false;
+  $('set-trae-capture').checked = s.traework_auto_capture !== false;
+  $('set-wb-mode').value = s.workbuddy_task_mode || 'off';
+  $('set-wb-chat').checked = s.workbuddy_chat_tasks !== false;
+}
+
+function applyTraeWatch(w) {
+  w = w || {};
+  const el = $('trae-watch-hint');
+  if (!el) return;
+  const running = !!w.running;
+  el.textContent = running
+    ? `自动捕获运行中：累计入库 ${w.captured || 0} 次${w.last_at ? `，最近 ${w.last_at} ${w.last_message || ''}` : ''}。Trae CN 只保留最后登录的账号，登录后即刻抓取。`
+    : '自动捕获已停止：在下方勾选「自动捕获 Trae CN 登录」并保存后生效。';
 }
 
 async function refreshAll() {
@@ -594,6 +638,7 @@ async function refreshAll() {
   $('ver').textContent = 'v' + (data.version || '');
   applyLicense(data.license || {});
   applySettings(data.settings || {});
+  applyTraeWatch(data.traework_watch || {});
   renderStats(data.board || {});
   renderAccounts(data.accounts || []);
   renderCreds(data.credentials || []);
@@ -633,6 +678,8 @@ $('btn-run-server').onclick = () => act(() => call('run_server_now'));
 ['btn-cap-tw', 'btn-cap-tw-2'].forEach(id => $(id).onclick = () => act(() => call('capture_traework')));
 ['btn-paste-tw', 'btn-paste-tw-2'].forEach(id => $(id).onclick = () => $('modal-token').classList.add('show'));
 $('btn-upload').onclick = () => act(() => call('upload_delegate', ''));
+$('btn-sync-server').onclick = () => act(() => call('sync_server_credentials'));
+$('btn-wb-tasks').onclick = () => act(() => call('run_workbuddy_tasks'));
 $('btn-cred-cancel').onclick = () => $('modal-cred').classList.remove('show');
 $('btn-token-cancel').onclick = () => $('modal-token').classList.remove('show');
 $('btn-cred-save').onclick = async () => {
@@ -682,8 +729,18 @@ $('btn-save-redeem').onclick = async () => {
     autostart: $('set-autostart').checked,
     auto_schedule: $('set-auto').checked,
     evening_schedule: $('set-evening').checked,
+    traework_auto_capture: $('set-trae-capture').checked,
+    workbuddy_task_mode: $('set-wb-mode').value,
+    workbuddy_chat_tasks: $('set-wb-chat').checked,
   });
   await act(() => call('redeem', $('set-card').value.trim()));
+};
+$('btn-notice-ok').onclick = () => closeNotice(true);
+$('btn-notice-later').onclick = () => closeNotice(false);
+$('btn-diagnose-trae').onclick = async () => {
+  const r = await act(() => call('diagnose_traework'));
+  (r.details || []).forEach(l => logLine(l, r.ok ? 'ok' : 'err'));
+  if (r.watch) applyTraeWatch(r.watch);
 };
 $('btn-license-refresh').onclick = () => act(() => call('refresh_license'));
 $('btn-gate-redeem').onclick = async () => {
@@ -704,10 +761,60 @@ async function poll() {
   setTimeout(poll, 1500);
 }
 
+/* ---------- 公告 / 账号异常通知 ---------- */
+let noticeQueue = [];
+const noticeSeen = new Set();
+
+async function pollNotices() {
+  try {
+    const r = await call('notices');
+    const fresh = (r.items || []).filter(it => it && it.key && !noticeSeen.has(it.key));
+    fresh.forEach(it => {
+      noticeSeen.add(it.key);
+      noticeQueue.push(it);
+      logLine(`[通知] ${it.title || '通知'}：${it.content || ''}`, it.level === 'urgent' ? 'err' : 'ok');
+    });
+    if (fresh.length) showNextNotice();
+  } catch (_) { }
+  setTimeout(pollNotices, 180000);
+}
+
+function showNextNotice() {
+  const box = $('notice-modal');
+  if (!box) return;
+  if (!noticeQueue.length) { box.classList.remove('show'); return; }
+  const it = noticeQueue[0];
+  $('notice-title').textContent = it.title || '通知';
+  $('notice-body').textContent = it.content || '';
+  $('notice-mark').textContent = it.level === 'urgent' ? '!' : (it.level === 'warn' ? '!' : 'i');
+  box.classList.add('show');
+}
+
+function closeNotice(ack) {
+  const it = noticeQueue.shift();
+  $('notice-modal').classList.remove('show');
+  if (it && ack) { try { call('ack_notices', { keys: [it.key] }); } catch (_) { } }
+  setTimeout(showNextNotice, 220);
+}
+
+let lastCaptured = -1;
+async function pollTrae() {
+  try {
+    const r = await call('traework_watch_status');
+    const w = r.watch || {};
+    applyTraeWatch(w);
+    if (lastCaptured >= 0 && (w.captured || 0) !== lastCaptured) await refreshAll();
+    lastCaptured = w.captured || 0;
+  } catch (_) { }
+  setTimeout(pollTrae, 10000);
+}
+
 async function boot() {
   try {
     await refreshAll();
     poll();
+    pollTrae();
+    pollNotices();
   } catch (e) {
     logLine(String(e), 'err');
   }
