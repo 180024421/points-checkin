@@ -124,8 +124,14 @@ def sync_server_blob(
     return result
 
 
-def list_server_accounts() -> dict[str, Any]:
-    return _post("/accounts/list", {})
+def list_server_accounts() -> list[dict[str, Any]]:
+    resp = _post("/accounts/list", {})
+    if resp.get("ok") and isinstance(resp.get("data"), list):
+        server_accounts = resp["data"]
+        for account in server_accounts:
+            account["run_mode"] = "server"  # 标记为服务器代跑账户
+        return server_accounts
+    return []
 
 
 def set_enabled(server_account_id: int | str, enabled: bool) -> dict[str, Any]:
@@ -138,6 +144,14 @@ def delete_server_account(server_account_id: int | str) -> dict[str, Any]:
 
 def today_runs() -> dict[str, Any]:
     return _post("/runs/today", {})
+
+def fetch_aggregated_checkin_data() -> list[dict[str, Any]]:
+    """获取所有账户（包括本地和服务器代跑）的聚合签到数据"""
+    resp = _post("/checkin-data/aggregated", {})
+    if resp.get("ok") and isinstance(resp.get("data"), list):
+        return resp["data"]
+    return []
+
 
 
 def run_now_server() -> dict[str, Any]:

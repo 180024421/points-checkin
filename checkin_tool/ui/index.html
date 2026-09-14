@@ -1,554 +1,1184 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>积分签到工具</title>
-<style>
-:root{
-  --bg:#eef3fa;
-  --bg-2:#e6eef9;
-  --panel:#ffffff;
-  --panel-soft:#f7fafd;
-  --line:#e3ebf4;
-  --line-strong:#d3e0ee;
-  --text:#132c45;
-  --text-2:#3c5670;
-  --muted:#7b8ea4;
-  --brand:#0a6fc2;
-  --brand-2:#0b8ed6;
-  --brand-deep:#084a86;
-  --brand-soft:#e8f3fd;
-  --ok:#0f9d68;
-  --ok-soft:#e7f8f0;
-  --warn:#c47d0a;
-  --warn-soft:#fdf4e3;
-  --danger:#d24545;
-  --danger-soft:#fdecec;
-  --radius:14px;
-  --radius-sm:10px;
-  --shadow:0 1px 2px rgba(19,44,69,.04), 0 8px 24px rgba(19,44,69,.06);
-  --shadow-lg:0 20px 50px rgba(9,40,70,.18);
-  --font:"Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --mono:"Cascadia Mono", Consolas, ui-monospace, monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
-body{
-  font-family:var(--font);
-  font-size:13px;
-  line-height:1.55;
-  color:var(--text);
-  background:linear-gradient(160deg,var(--bg),var(--bg-2));
-  overflow:hidden;
-  -webkit-font-smoothing:antialiased;
-}
-button,input,textarea,select{font-family:inherit;font-size:13px;color:inherit}
-::-webkit-scrollbar{width:9px;height:9px}
-::-webkit-scrollbar-thumb{background:#c9d7e6;border-radius:99px;border:2px solid transparent;background-clip:content-box}
-::-webkit-scrollbar-thumb:hover{background:#aec3d8;background-clip:content-box}
-::-webkit-scrollbar-track{background:transparent}
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>积分签到工具</title>
+  <style>
+    :root {
+      --bg: #eef3fa;
+      --bg-2: #e6eef9;
+      --panel: #ffffff;
+      --panel-soft: #f7fafd;
+      --line: #e3ebf4;
+      --line-strong: #d3e0ee;
+      --text: #132c45;
+      --text-2: #3c5670;
+      --muted: #7b8ea4;
+      --brand: #0a6fc2;
+      --brand-2: #0b8ed6;
+      --brand-deep: #084a86;
+      --brand-soft: #e8f3fd;
+      --ok: #0f9d68;
+      --ok-soft: #e7f8f0;
+      --warn: #c47d0a;
+      --warn-soft: #fdf4e3;
+      --danger: #d24545;
+      --danger-soft: #fdecec;
+      --radius: 14px;
+      --radius-sm: 10px;
+      --shadow: 0 1px 2px rgba(19, 44, 69, .04), 0 8px 24px rgba(19, 44, 69, .06);
+      --shadow-lg: 0 20px 50px rgba(9, 40, 70, .18);
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+    }
 
-/* ---------------- 布局 ---------------- */
-.app{height:100%;display:flex;flex-direction:column;overflow:hidden}
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0
+    }
 
-/* 顶栏 */
-.topbar{
-  flex:0 0 auto;
-  background:linear-gradient(120deg,var(--brand-deep),var(--brand) 55%,var(--brand-2));
-  color:#fff;padding:13px 20px;
-  display:flex;align-items:center;gap:14px;
-  box-shadow:0 2px 14px rgba(8,74,134,.22);
-  position:relative;z-index:5;
-}
-.brand{display:flex;align-items:center;gap:12px;min-width:0}
-.brand .logo{
-  width:38px;height:38px;border-radius:11px;flex:0 0 auto;
-  background:rgba(255,255,255,.16);
-  border:1px solid rgba(255,255,255,.28);
-  display:grid;place-items:center;overflow:hidden;
-}
-.brand .logo img{width:100%;height:100%;object-fit:cover;display:block}
-.brand h1{font-size:15.5px;font-weight:650;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
-.brand h1 .ver{
-  font-size:11px;font-weight:500;color:rgba(255,255,255,.75);
-  background:rgba(255,255,255,.14);padding:1px 7px;border-radius:99px;
-}
-.brand .sub{font-size:11.5px;color:rgba(255,255,255,.72);margin-top:1px}
-.topbar .spacer{flex:1 1 auto}
-.chips{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
-.chip{
-  display:inline-flex;align-items:center;gap:6px;
-  padding:4.5px 11px;border-radius:99px;font-size:11.5px;font-weight:600;
-  background:rgba(255,255,255,.16);color:#fff;
-  border:1px solid rgba(255,255,255,.24);
-  white-space:nowrap;
-}
-.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.9}
-.chip.ok{background:rgba(20,180,120,.28);border-color:rgba(160,240,210,.5)}
-.chip.warn{background:rgba(235,170,40,.28);border-color:rgba(255,220,160,.5)}
-.chip.off{background:rgba(255,255,255,.14)}
+    html,
+    body {
+      height: 100%
+    }
 
-/* 标签栏 */
-.tabbar{
-  flex:0 0 auto;background:#fff;border-bottom:1px solid var(--line);
-  padding:0 20px;display:flex;align-items:center;gap:4px;
-}
-.tab{
-  appearance:none;border:none;background:none;cursor:pointer;
-  padding:12px 15px 11px;font-size:13px;font-weight:600;color:var(--muted);
-  border-bottom:2px solid transparent;transition:color .15s,border-color .15s;
-}
-.tab:hover{color:var(--text-2)}
-.tab.active{color:var(--brand);border-bottom-color:var(--brand)}
+    body {
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--text);
+      background: linear-gradient(160deg, var(--bg), var(--bg-2));
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
 
-/* 内容区 */
-.content{flex:1 1 auto;min-height:0;overflow-y:auto;padding:16px 20px}
-.page{display:none;animation:fade .18s ease}
-.page.active{display:block}
-@keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+    button,
+    input,
+    textarea,
+    select {
+      font-family: inherit;
+      font-size: 13px;
+      color: inherit
+    }
 
-/* ---------------- 组件 ---------------- */
-.card{
-  background:var(--panel);border:1px solid var(--line);
-  border-radius:var(--radius);box-shadow:var(--shadow);
-  padding:16px 18px;margin-bottom:14px;
-}
-.card:last-child{margin-bottom:0}
-.card-head{
-  display:flex;align-items:center;gap:9px;margin-bottom:12px;
-}
-.card-head .bar{width:3px;height:14px;border-radius:99px;background:linear-gradient(var(--brand),var(--brand-2))}
-.card-head h2{font-size:13px;font-weight:650;letter-spacing:.2px}
-.card-head .spacer{flex:1 1 auto}
-.label{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:9px}
-.hint{color:var(--muted);font-size:12px;line-height:1.6}
-.muted{color:var(--muted)}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.row.end{justify-content:flex-end}
-.gap-sm{margin-top:10px}
-.gap-md{margin-top:14px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-@media (max-width:820px){.grid2,.grid3{grid-template-columns:1fr}}
+    ::-webkit-scrollbar {
+      width: 9px;
+      height: 9px
+    }
 
-/* 统计卡 */
-.stat{
-  position:relative;background:var(--panel);border:1px solid var(--line);
-  border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);overflow:hidden;
-}
-.stat::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--brand);opacity:.85}
-.stat .k{color:var(--muted);font-size:11.5px;font-weight:600}
-.stat .v{font-size:26px;font-weight:700;letter-spacing:-.5px;margin-top:3px;line-height:1.15}
-.stat.ok::after{background:var(--ok)}
-.stat.ok .v{color:var(--ok)}
-.stat.warn::after{background:var(--warn)}
-.stat.warn .v{color:var(--warn)}
+    ::-webkit-scrollbar-thumb {
+      background: #c9d7e6;
+      border-radius: 99px;
+      border: 2px solid transparent;
+      background-clip: content-box
+    }
 
-/* 按钮 */
-button{
-  appearance:none;cursor:pointer;
-  border:1px solid var(--line-strong);background:#fff;color:var(--text-2);
-  border-radius:var(--radius-sm);padding:8px 14px;font-weight:600;font-size:12.5px;
-  transition:background .14s,border-color .14s,color .14s,box-shadow .14s,transform .06s;
-  white-space:nowrap;
-}
-button:hover:not(:disabled){background:var(--panel-soft);border-color:#c2d3e4;color:var(--text)}
-button:active:not(:disabled){transform:translateY(1px)}
-button:focus-visible{outline:2px solid rgba(10,111,194,.35);outline-offset:1px}
-button:disabled{opacity:.5;cursor:not-allowed}
-button.primary{
-  background:linear-gradient(135deg,var(--brand),var(--brand-2));
-  border-color:transparent;color:#fff;
-  box-shadow:0 2px 10px rgba(10,111,194,.26);
-}
-button.primary:hover:not(:disabled){filter:brightness(1.06);background:linear-gradient(135deg,var(--brand),var(--brand-2));color:#fff}
-button.ghost{background:transparent;border-color:transparent;color:var(--muted)}
-button.ghost:hover:not(:disabled){background:var(--panel-soft);border-color:var(--line);color:var(--text-2)}
-button.danger{color:var(--danger);border-color:#f2cccc;background:#fff}
-button.danger:hover:not(:disabled){background:var(--danger-soft);border-color:#e9b4b4;color:var(--danger)}
-button.sm{padding:5px 11px;font-size:12px;border-radius:8px}
-button.on-topbar{
-  background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.26);color:#fff;
-}
-button.on-topbar:hover:not(:disabled){background:rgba(255,255,255,.26);color:#fff;border-color:rgba(255,255,255,.4)}
+    ::-webkit-scrollbar-thumb:hover {
+      background: #aec3d8;
+      background-clip: content-box
+    }
 
-/* 表单 */
-.field{display:grid;gap:6px;margin-bottom:10px}
-.field:last-child{margin-bottom:0}
-.field > span{color:var(--muted);font-size:11.5px;font-weight:600}
-input,textarea,select{
-  width:100%;border:1px solid var(--line-strong);border-radius:var(--radius-sm);
-  padding:9px 11px;background:#fff;color:var(--text);outline:none;
-  transition:border-color .14s,box-shadow .14s,background .14s;
-}
-input::placeholder,textarea::placeholder{color:#a9bbcd}
-input:focus,textarea:focus,select:focus{
-  border-color:var(--brand);box-shadow:0 0 0 3px rgba(10,111,194,.13);
-}
-textarea{min-height:76px;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.6}
-label.chk{
-  display:inline-flex;align-items:center;gap:7px;cursor:pointer;
-  color:var(--text-2);font-size:12.5px;user-select:none;
-  padding:6px 10px;border:1px solid var(--line);border-radius:99px;background:#fff;
-  transition:border-color .14s,background .14s;
-}
-label.chk:hover{border-color:#c2d3e4;background:var(--panel-soft)}
-label.chk input{width:auto;accent-color:var(--brand);margin:0}
+    ::-webkit-scrollbar-track {
+      background: transparent
+    }
 
-/* 列表项 */
-.list{display:grid;gap:9px}
-.item{
-  display:flex;justify-content:space-between;gap:12px;align-items:center;
-  padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-sm);
-  background:var(--panel-soft);transition:border-color .14s,background .14s,box-shadow .14s;
-}
-.item:hover{border-color:#cfe0ef;background:#fff;box-shadow:var(--shadow)}
-.item .main{min-width:0}
-.item .title{font-weight:650;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.item .meta{color:var(--muted);font-size:11.5px;margin-top:4px;font-family:var(--mono);word-break:break-all}
-.item .err{color:var(--danger);font-size:11.5px;margin-top:3px;word-break:break-all}
-.item .actions{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
-.tag{
-  font-size:10.5px;font-weight:700;padding:1.5px 8px;border-radius:99px;
-  background:var(--brand-soft);color:var(--brand);border:1px solid #cfe6f9;
-}
-.tag.bad{background:var(--danger-soft);color:var(--danger);border-color:#f4cdcd}
-.tag.ok{background:var(--ok-soft);color:var(--ok);border-color:#c4ecd9}
+    /* ---------------- 布局 ---------------- */
+    .app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden
+    }
 
-.empty{
-  color:var(--muted);text-align:center;padding:26px 10px;font-size:12.5px;
-  border:1px dashed var(--line-strong);border-radius:var(--radius-sm);background:var(--panel-soft);
-}
+    /* 顶栏 */
+    .topbar {
+      flex: 0 0 auto;
+      background: linear-gradient(120deg, var(--brand-deep), var(--brand) 55%, var(--brand-2));
+      color: #fff;
+      padding: 13px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 2px 14px rgba(8, 74, 134, .22);
+      position: relative;
+      z-index: 5;
+    }
 
-/* 表格 */
-.table{width:100%;border-collapse:collapse;font-size:12.5px}
-.table th,.table td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line)}
-.table th{color:var(--muted);font-weight:650;font-size:11.5px;letter-spacing:.03em}
-.table tbody tr:hover{background:var(--panel-soft)}
-.table td:first-child{font-family:var(--mono);font-size:11.5px;color:var(--text-2)}
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0
+    }
 
-/* 日志 */
-.logbar-wrap{flex:0 0 auto;padding:0 20px 14px}
-.logbar-head{display:flex;align-items:center;gap:10px;margin-bottom:7px}
-.logbar-head .spacer{flex:1 1 auto}
-.logbar{
-  border:1px solid var(--line);border-radius:var(--radius);background:#fff;
-  padding:10px 13px;height:132px;overflow-y:auto;
-  font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--text-2);
-  box-shadow:var(--shadow);
-}
-.logbar > div{border-bottom:1px solid #f2f6fa;padding:1px 0}
-.logbar > div:last-child{border-bottom:none}
-.logbar .ok{color:var(--ok)}
-.logbar .err{color:var(--danger)}
-.logbar:empty::before{content:"就绪，等待操作…";color:#a9bbcd}
+    .brand .logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      flex: 0 0 auto;
+      background: rgba(255, 255, 255, .16);
+      border: 1px solid rgba(255, 255, 255, .28);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
 
-/* 遮罩 */
-.gate,.modal{
-  position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:24px;
-  background:rgba(9,40,70,.42);backdrop-filter:blur(3px);z-index:40;
-}
-.gate{z-index:60}
-.modal{z-index:50}
-.gate.show,.modal.show{display:flex}
-.panel-box{
-  width:min(430px,100%);background:#fff;border:1px solid var(--line);
-  border-radius:16px;padding:24px;box-shadow:var(--shadow-lg);
-  animation:pop .18s ease;
-}
-.modal .panel-box{width:min(540px,100%);padding:20px}
-@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
-.panel-box h2{font-size:17px;font-weight:680;margin-bottom:6px}
-.panel-box .lead{color:var(--muted);font-size:12.5px;margin-bottom:16px;line-height:1.6}
-.panel-box .mark{
-  width:44px;height:44px;border-radius:13px;margin-bottom:14px;
-  background:linear-gradient(135deg,var(--brand),var(--brand-2));
-  display:grid;place-items:center;color:#fff;font-size:20px;font-weight:700;
-  box-shadow:0 8px 20px rgba(10,111,194,.28);
-}
-</style>
+    .brand .logo img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block
+    }
+
+    .brand h1 {
+      font-size: 15.5px;
+      font-weight: 650;
+      letter-spacing: .2px;
+      display: flex;
+      align-items: center;
+      gap: 8px
+    }
+
+    .brand h1 .ver {
+      font-size: 11px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, .75);
+      background: rgba(255, 255, 255, .14);
+      padding: 1px 7px;
+      border-radius: 99px;
+    }
+
+    .brand .sub {
+      font-size: 11.5px;
+      color: rgba(255, 255, 255, .72);
+      margin-top: 1px
+    }
+
+    .topbar .spacer {
+      flex: 1 1 auto
+    }
+
+    .chips {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+      justify-content: flex-end
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4.5px 11px;
+      border-radius: 99px;
+      font-size: 11.5px;
+      font-weight: 600;
+      background: rgba(255, 255, 255, .16);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, .24);
+      white-space: nowrap;
+    }
+
+    .chip::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .9
+    }
+
+    .chip.ok {
+      background: rgba(20, 180, 120, .28);
+      border-color: rgba(160, 240, 210, .5)
+    }
+
+    .chip.warn {
+      background: rgba(235, 170, 40, .28);
+      border-color: rgba(255, 220, 160, .5)
+    }
+
+    .chip.off {
+      background: rgba(255, 255, 255, .14)
+    }
+
+    /* 标签栏 */
+    .tabbar {
+      flex: 0 0 auto;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .tab {
+      appearance: none;
+      border: none;
+      background: none;
+      cursor: pointer;
+      padding: 12px 15px 11px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+
+    .tab:hover {
+      color: var(--text-2)
+    }
+
+    .tab.active {
+      color: var(--brand);
+      border-bottom-color: var(--brand)
+    }
+
+    /* 内容区 */
+    .content {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 16px 20px
+    }
+
+    .page {
+      display: none;
+      animation: fade .18s ease
+    }
+
+    .page.active {
+      display: block
+    }
+
+    @keyframes fade {
+      from {
+        opacity: 0;
+        transform: translateY(3px)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+
+    /* ---------------- 组件 ---------------- */
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 16px 18px;
+      margin-bottom: 14px;
+    }
+
+    .card:last-child {
+      margin-bottom: 0
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 12px;
+    }
+
+    .card-head .bar {
+      width: 3px;
+      height: 14px;
+      border-radius: 99px;
+      background: linear-gradient(var(--brand), var(--brand-2))
+    }
+
+    .card-head h2 {
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: .2px
+    }
+
+    .card-head .spacer {
+      flex: 1 1 auto
+    }
+
+    .label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 9px
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6
+    }
+
+    .muted {
+      color: var(--muted)
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center
+    }
+
+    .row.end {
+      justify-content: flex-end
+    }
+
+    .gap-sm {
+      margin-top: 10px
+    }
+
+    .gap-md {
+      margin-top: 14px
+    }
+
+    .grid2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px
+    }
+
+    @media (max-width:820px) {
+
+      .grid2,
+      .grid3 {
+        grid-template-columns: 1fr
+      }
+    }
+
+    /* 统计卡 */
+    .stat {
+      position: relative;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .stat::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--brand);
+      opacity: .85
+    }
+
+    .stat .k {
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 600
+    }
+
+    .stat .v {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -.5px;
+      margin-top: 3px;
+      line-height: 1.15
+    }
+
+    .stat.ok::after {
+      background: var(--ok)
+    }
+
+    .stat.ok .v {
+      color: var(--ok)
+    }
+
+    .stat.warn::after {
+      background: var(--warn)
+    }
+
+    .stat.warn .v {
+      color: var(--warn)
+    }
+
+    /* 按钮 */
+    button {
+      appearance: none;
+      cursor: pointer;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      color: var(--text-2);
+      border-radius: var(--radius-sm);
+      padding: 8px 14px;
+      font-weight: 600;
+      font-size: 12.5px;
+      transition: background .14s, border-color .14s, color .14s, box-shadow .14s, transform .06s;
+      white-space: nowrap;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--panel-soft);
+      border-color: #c2d3e4;
+      color: var(--text)
+    }
+
+    button:active:not(:disabled) {
+      transform: translateY(1px)
+    }
+
+    button:focus-visible {
+      outline: 2px solid rgba(10, 111, 194, .35);
+      outline-offset: 1px
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 2px 10px rgba(10, 111, 194, .26);
+    }
+
+    button.primary:hover:not(:disabled) {
+      filter: brightness(1.06);
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      color: #fff
+    }
+
+    button.ghost {
+      background: transparent;
+      border-color: transparent;
+      color: var(--muted)
+    }
+
+    button.ghost:hover:not(:disabled) {
+      background: var(--panel-soft);
+      border-color: var(--line);
+      color: var(--text-2)
+    }
+
+    button.danger {
+      color: var(--danger);
+      border-color: #f2cccc;
+      background: #fff
+    }
+
+    button.danger:hover:not(:disabled) {
+      background: var(--danger-soft);
+      border-color: #e9b4b4;
+      color: var(--danger)
+    }
+
+    button.sm {
+      padding: 5px 11px;
+      font-size: 12px;
+      border-radius: 8px
+    }
+
+    button.on-topbar {
+      background: rgba(255, 255, 255, .16);
+      border-color: rgba(255, 255, 255, .26);
+      color: #fff;
+    }
+
+    button.on-topbar:hover:not(:disabled) {
+      background: rgba(255, 255, 255, .26);
+      color: #fff;
+      border-color: rgba(255, 255, 255, .4)
+    }
+
+    /* 表单 */
+    .field {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px
+    }
+
+    .field:last-child {
+      margin-bottom: 0
+    }
+
+    .field>span {
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 600
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      padding: 9px 11px;
+      background: #fff;
+      color: var(--text);
+      outline: none;
+      transition: border-color .14s, box-shadow .14s, background .14s;
+    }
+
+    input::placeholder,
+    textarea::placeholder {
+      color: #a9bbcd
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(10, 111, 194, .13);
+    }
+
+    textarea {
+      min-height: 76px;
+      resize: vertical;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6
+    }
+
+    label.chk {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+      color: var(--text-2);
+      font-size: 12.5px;
+      user-select: none;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 99px;
+      background: #fff;
+      transition: border-color .14s, background .14s;
+    }
+
+    label.chk:hover {
+      border-color: #c2d3e4;
+      background: var(--panel-soft)
+    }
+
+    label.chk input {
+      width: auto;
+      accent-color: var(--brand);
+      margin: 0
+    }
+
+    /* 列表项 */
+    .list {
+      display: grid;
+      gap: 9px
+    }
+
+    .item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      transition: border-color .14s, background .14s, box-shadow .14s;
+    }
+
+    .item:hover {
+      border-color: #cfe0ef;
+      background: #fff;
+      box-shadow: var(--shadow)
+    }
+
+    .item .main {
+      min-width: 0
+    }
+
+    .item .title {
+      font-weight: 650;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap
+    }
+
+    .item .meta {
+      color: var(--muted);
+      font-size: 11.5px;
+      margin-top: 4px;
+      font-family: var(--mono);
+      word-break: break-all
+    }
+
+    .item .err {
+      color: var(--danger);
+      font-size: 11.5px;
+      margin-top: 3px;
+      word-break: break-all
+    }
+
+    .item .actions {
+      display: flex;
+      gap: 6px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+      justify-content: flex-end
+    }
+
+    .tag {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 1.5px 8px;
+      border-radius: 99px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      border: 1px solid #cfe6f9;
+    }
+
+    .tag.bad {
+      background: var(--danger-soft);
+      color: var(--danger);
+      border-color: #f4cdcd
+    }
+
+    .tag.ok {
+      background: var(--ok-soft);
+      color: var(--ok);
+      border-color: #c4ecd9
+    }
+
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 26px 10px;
+      font-size: 12.5px;
+      border: 1px dashed var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+    }
+
+    /* 表格 */
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px
+    }
+
+    .table th,
+    .table td {
+      text-align: left;
+      padding: 9px 8px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .table th {
+      color: var(--muted);
+      font-weight: 650;
+      font-size: 11.5px;
+      letter-spacing: .03em
+    }
+
+    .table tbody tr:hover {
+      background: var(--panel-soft)
+    }
+
+    .table td:first-child {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--text-2)
+    }
+
+    /* 日志 */
+    .logbar-wrap {
+      flex: 0 0 auto;
+      padding: 0 20px 14px
+    }
+
+    .logbar-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px
+    }
+
+    .logbar-head .spacer {
+      flex: 1 1 auto
+    }
+
+    .logbar {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 10px 13px;
+      height: 132px;
+      overflow-y: auto;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.75;
+      color: var(--text-2);
+      box-shadow: var(--shadow);
+    }
+
+    .logbar>div {
+      border-bottom: 1px solid #f2f6fa;
+      padding: 1px 0
+    }
+
+    .logbar>div:last-child {
+      border-bottom: none
+    }
+
+    .logbar .ok {
+      color: var(--ok)
+    }
+
+    .logbar .err {
+      color: var(--danger)
+    }
+
+    .logbar:empty::before {
+      content: "就绪，等待操作…";
+      color: #a9bbcd
+    }
+
+    /* 遮罩 */
+    .gate,
+    .modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(9, 40, 70, .42);
+      backdrop-filter: blur(3px);
+      z-index: 40;
+    }
+
+    .gate {
+      z-index: 60
+    }
+
+    .modal {
+      z-index: 50
+    }
+
+    .gate.show,
+    .modal.show {
+      display: flex
+    }
+
+    .panel-box {
+      width: min(430px, 100%);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: var(--shadow-lg);
+      animation: pop .18s ease;
+    }
+
+    .modal .panel-box {
+      width: min(540px, 100%);
+      padding: 20px
+    }
+
+    @keyframes pop {
+      from {
+        opacity: 0;
+        transform: translateY(8px) scale(.985)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+
+    .panel-box h2 {
+      font-size: 17px;
+      font-weight: 680;
+      margin-bottom: 6px
+    }
+
+    .panel-box .lead {
+      color: var(--muted);
+      font-size: 12.5px;
+      margin-bottom: 16px;
+      line-height: 1.6
+    }
+
+    .panel-box .mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 13px;
+      margin-bottom: 14px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 20px;
+      font-weight: 700;
+      box-shadow: 0 8px 20px rgba(10, 111, 194, .28);
+    }
+  </style>
 </head>
+
 <body>
 
-<!-- 激活门禁 -->
-<div class="gate" id="gate">
-  <div class="panel-box">
-    <div class="mark">◆</div>
-    <h2>激活后使用</h2>
-    <p class="lead" id="gate-msg">请输入卡密完成授权，授权与本机绑定。</p>
-    <div class="field"><span>卡密</span><input id="gate-code" placeholder="粘贴卡密" autocomplete="off"></div>
-    <div class="row gap-md">
-      <button class="primary" id="btn-gate-redeem" style="flex:1">激活</button>
-      <button class="ghost" id="btn-gate-refresh">刷新状态</button>
+  <!-- 激活门禁 -->
+  <div class="gate" id="gate">
+    <div class="panel-box">
+      <div class="mark">◆</div>
+      <h2>激活后使用</h2>
+      <p class="lead" id="gate-msg">请输入卡密完成授权，授权与本机绑定。</p>
+      <div class="field"><span>卡密</span><input id="gate-code" placeholder="粘贴卡密" autocomplete="off"></div>
+      <div class="row gap-md">
+        <button class="primary" id="btn-gate-redeem" style="flex:1">激活</button>
+        <button class="ghost" id="btn-gate-refresh">刷新状态</button>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- 导入账密 -->
-<div class="modal" id="modal-cred">
-  <div class="panel-box">
-    <div class="card-head"><span class="bar"></span><h2>导入账密</h2></div>
-    <div class="grid2">
-      <div class="field"><span>产品</span>
-        <select id="cred-provider">
-          <option value="workbuddy">WorkBuddy</option>
-          <option value="traework">TraeWork</option>
-        </select>
+  <!-- 导入账密 -->
+  <div class="modal" id="modal-cred">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>导入账密</h2>
       </div>
-      <div class="field"><span>备注</span><input id="cred-label" placeholder="可选"></div>
-    </div>
-    <div class="field"><span>账号（邮箱 / 手机）</span><input id="cred-user" autocomplete="off"></div>
-    <div class="field"><span>密码</span><input id="cred-pass" type="password" autocomplete="off"></div>
-    <label class="chk" style="margin-bottom:10px"><input type="checkbox" id="cred-login-now" checked> 保存后立即统一登录</label>
-    <div class="field"><span>或批量导入（每行 <code>provider,username,password[,label]</code>）</span>
-      <textarea id="cred-batch" placeholder="workbuddy,a@x.com,密码,备注"></textarea>
-    </div>
-    <div class="row end gap-md">
-      <button class="ghost" id="btn-cred-cancel">取消</button>
-      <button class="primary" id="btn-cred-save">保存</button>
-    </div>
-  </div>
-</div>
-
-<!-- 粘贴 token -->
-<div class="modal" id="modal-token">
-  <div class="panel-box">
-    <div class="card-head"><span class="bar"></span><h2>粘贴 Trae Token</h2></div>
-    <div class="field"><span>Token</span><input id="trae-token" type="password" placeholder="cloudide / Bearer token" autocomplete="off"></div>
-    <div class="field"><span>user_id（可空）</span><input id="trae-uid" autocomplete="off"></div>
-    <div class="row end gap-md">
-      <button class="ghost" id="btn-token-cancel">取消</button>
-      <button class="primary" id="btn-token-save">导入</button>
-    </div>
-  </div>
-</div>
-
-<!-- 主体 -->
-<div class="app" id="shell">
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo"><img id="app-icon" src="icon.png" alt="" onerror="this.style.display='none'"></div>
-      <div>
-        <h1>积分签到工具 <span class="ver" id="ver">v—</span></h1>
-        <div class="sub">WorkBuddy / TraeWork · 本机签或服务器代跑</div>
-      </div>
-    </div>
-    <div class="spacer"></div>
-    <div class="chips">
-      <span class="chip off" id="chip-license">授权检测中</span>
-      <span class="chip off" id="chip-today">今日 —</span>
-      <button class="sm on-topbar" id="btn-refresh">刷新</button>
-    </div>
-  </header>
-
-  <nav class="tabbar">
-    <button class="tab active" data-tab="home">概览</button>
-    <button class="tab" data-tab="accounts">账号</button>
-    <button class="tab" data-tab="today">今日</button>
-    <button class="tab" data-tab="credits">积分</button>
-    <button class="tab" data-tab="settings">设置</button>
-  </nav>
-
-  <main class="content">
-    <!-- 概览 -->
-    <section class="page active" id="page-home">
-      <div class="grid3" id="home-stats">
-        <div class="stat ok"><div class="k">已跑</div><div class="v">—</div></div>
-        <div class="stat"><div class="k">未跑</div><div class="v">—</div></div>
-        <div class="stat warn"><div class="k">失败</div><div class="v">—</div></div>
-      </div>
-      <div class="card gap-md">
-        <div class="card-head"><span class="bar"></span><h2>快捷操作</h2></div>
-        <div class="row">
-          <button class="primary" id="btn-run-local">本机立即签到</button>
-          <button id="btn-refresh-credits">刷新积分</button>
-          <button id="btn-run-server">服务器代跑</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>入池方式</h2></div>
-        <p class="hint">官方客户端登录后采集 / 粘贴 token；或导入账密统一登录（优先 API，失败再开浏览器）。账密本机加密，代跑只上传 token。Trae CN 登录态会在登录瞬间自动入库（设置页可开关）。</p>
-        <div class="row gap-md">
-          <button id="btn-import-cred">导入账密</button>
-          <button id="btn-login-all">统一登录</button>
-          <button id="btn-cap-wb">采集 WorkBuddy</button>
-          <button id="btn-cap-tw">采集 TraeWork</button>
-          <button id="btn-paste-tw">粘贴 Trae token</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- 账号 -->
-    <section class="page" id="page-accounts">
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>账号操作</h2></div>
-        <div class="row">
-          <button class="sm" id="btn-import-cred-2">导入账密</button>
-          <button class="sm" id="btn-login-all-2">统一登录</button>
-          <button class="sm" id="btn-cap-wb-2">采集 WorkBuddy</button>
-          <button class="sm" id="btn-cap-tw-2">采集 TraeWork</button>
-          <button class="sm" id="btn-paste-tw-2">粘贴 token</button>
-          <button class="sm" id="btn-upload">上传代跑</button>
-          <button class="sm" id="btn-sync-server">同步代跑凭证</button>
-          <button class="sm" id="btn-wb-tasks">执行 WorkBuddy 任务</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>账号列表</h2></div>
-        <div class="list" id="acc-list"><div class="empty">暂无账号</div></div>
-      </div>
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>已存账密</h2></div>
-        <div class="list" id="cred-list"><div class="empty">暂无账密</div></div>
-      </div>
-    </section>
-
-    <!-- 今日 -->
-    <section class="page" id="page-today">
-      <div class="grid3">
-        <div class="card" style="margin-bottom:0"><div class="label">已跑</div><div id="list-done" class="hint">—</div></div>
-        <div class="card" style="margin-bottom:0"><div class="label">未跑</div><div id="list-pending" class="hint">—</div></div>
-        <div class="card" style="margin-bottom:0"><div class="label">失败</div><div id="list-failed" class="hint">—</div></div>
-      </div>
-    </section>
-
-    <!-- 积分 -->
-    <section class="page" id="page-credits">
-      <div class="card">
-        <div class="card-head">
-          <span class="bar"></span><h2>积分记录</h2>
-          <div class="spacer"></div>
-          <button class="sm danger" id="btn-clear-credits">清理</button>
-        </div>
-        <table class="table">
-          <thead><tr><th>时间</th><th>产品</th><th>积分</th><th>连签</th><th>说明</th></tr></thead>
-          <tbody id="credit-body"><tr><td colspan="5"><div class="empty">暂无记录</div></td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- 设置 -->
-    <section class="page" id="page-settings">
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>授权</h2></div>
-        <div class="field"><span>授权服务</span><input id="set-base" placeholder="http://..."></div>
-        <div class="field"><span>卡密</span><input id="set-card" type="password" autocomplete="off"></div>
-        <div class="row gap-sm">
-          <button class="primary" id="btn-save-redeem">保存并激活</button>
-          <button id="btn-license-refresh">刷新授权</button>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><span class="bar"></span><h2>本机选项</h2></div>
-        <div class="row">
-          <label class="chk"><input type="checkbox" id="set-autostart"> 开机自启</label>
-          <label class="chk"><input type="checkbox" id="set-auto"> 早晚调度</label>
-          <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
-          <label class="chk"><input type="checkbox" id="set-trae-capture"> 自动捕获 Trae CN 登录</label>
-        </div>
-        <div class="row gap-md" style="align-items:center">
-          <span class="label" style="margin:0">WorkBuddy 成长任务</span>
-          <select id="set-wb-mode" style="max-width:220px">
-            <option value="off">关闭</option>
-            <option value="local">本机执行</option>
-            <option value="server">服务器代跑</option>
+      <div class="grid2">
+        <div class="field"><span>产品</span>
+          <select id="cred-provider">
+            <option value="workbuddy">WorkBuddy</option>
+            <option value="traework">TraeWork</option>
           </select>
-          <label class="chk"><input type="checkbox" id="set-wb-chat"> 含 AI 对话任务</label>
         </div>
-        <p class="hint">成长任务：召唤专家、模板、聊天、抽奖、盲盒、派猫猫旅行、连签兑换等，只补未完成项，重复运行不会重复领取。选「服务器代跑」后需重新点一次「上传代跑」才会生效。</p>
-        <p class="hint" id="trae-watch-hint">Trae CN 在本机只保留「最后登录的那一个」账号，切号会覆盖旧登录态；开启后每次登录都会自动入库，无需手动采集。</p>
-        <div class="row gap-md">
-          <button class="sm" id="btn-diagnose-trae">检测 Trae CN 登录态</button>
-        </div>
-        <div class="row gap-md">
-          <button class="sm" id="btn-clear-live">清理实时日志</button>
-          <button class="sm" id="btn-clear-runs">清理跑批日志</button>
+        <div class="field"><span>备注</span><input id="cred-label" placeholder="可选"></div>
+      </div>
+      <div class="field"><span>账号（邮箱 / 手机）</span><input id="cred-user" autocomplete="off"></div>
+      <div class="field"><span>密码</span><input id="cred-pass" type="password" autocomplete="off"></div>
+      <label class="chk" style="margin-bottom:10px"><input type="checkbox" id="cred-login-now" checked>
+        保存后立即统一登录</label>
+      <div class="field"><span>或批量导入（每行 <code>provider,username,password[,label]</code>）</span>
+        <textarea id="cred-batch" placeholder="workbuddy,a@x.com,密码,备注"></textarea>
+      </div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-cred-cancel">取消</button>
+        <button class="primary" id="btn-cred-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 粘贴 token -->
+  <div class="modal" id="modal-token">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>粘贴 Trae Token</h2>
+      </div>
+      <div class="field"><span>Token</span><input id="trae-token" type="password" placeholder="cloudide / Bearer token"
+          autocomplete="off"></div>
+      <div class="field"><span>user_id（可空）</span><input id="trae-uid" autocomplete="off"></div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-token-cancel">取消</button>
+        <button class="primary" id="btn-token-save">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主体 -->
+  <div class="app" id="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo"><img id="app-icon" src="icon.png" alt="" onerror="this.style.display='none'"></div>
+        <div>
+          <h1>积分签到工具 <span class="ver" id="ver">v—</span></h1>
+          <div class="sub">WorkBuddy / TraeWork · 本机签或服务器代跑</div>
         </div>
       </div>
-    </section>
-  </main>
-
-<!-- 公告 / 账号异常通知 -->
-<div class="modal" id="notice-modal">
-  <div class="panel-box">
-    <div class="mark" id="notice-mark">!</div>
-    <h2 id="notice-title">通知</h2>
-    <p class="lead" id="notice-body" style="white-space:pre-wrap;max-height:280px;overflow:auto"></p>
-    <div class="row gap-md" style="justify-content:flex-end">
-      <button class="sm ghost" id="btn-notice-later">稍后再说</button>
-      <button class="sm" id="btn-notice-ok">知道了</button>
-    </div>
-  </div>
-</div>
-
-  <div class="logbar-wrap">
-    <div class="logbar-head">
-      <span class="label" style="margin:0">运行日志</span>
-
       <div class="spacer"></div>
-      <button class="sm ghost" id="btn-log-clear">清理</button>
+      <div class="chips">
+        <span class="chip off" id="chip-license">授权检测中</span>
+        <span class="chip off" id="chip-account-limit">账号限制：-</span>
+        <span class="chip off" id="chip-today">今日 —</span>
+        <button class="sm on-topbar" id="btn-refresh">刷新</button>
+      </div>
+    </header>
+
+    <nav class="tabbar">
+      <button class="tab active" data-tab="home">概览</button>
+      <button class="tab" data-tab="accounts">账号</button>
+      <button class="tab" data-tab="today">今日</button>
+      <button class="tab" data-tab="credits">积分</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </nav>
+
+    <main class="content">
+      <!-- 概览 -->
+      <section class="page active" id="page-home">
+        <div class="grid3" id="home-stats">
+          <div class="stat ok">
+            <div class="k">已跑</div>
+            <div class="v">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">未跑</div>
+            <div class="v">—</div>
+          </div>
+          <div class="stat warn">
+            <div class="k">失败</div>
+            <div class="v">—</div>
+          </div>
+        </div>
+        <div class="card gap-md">
+          <div class="card-head"><span class="bar"></span>
+            <h2>快捷操作</h2>
+          </div>
+          <div class="row">
+            <button class="primary" id="btn-run-local">本机立即签到</button>
+            <button id="btn-refresh-credits">刷新积分</button>
+            <button id="btn-run-server">服务器代跑</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>入池方式</h2>
+          </div>
+          <p class="hint">官方客户端登录后采集 / 粘贴 token；或导入账密统一登录（优先 API，失败再开浏览器）。账密本机加密，代跑只上传 token。Trae CN
+            登录态会在登录瞬间自动入库（设置页可开关）。</p>
+          <div class="row gap-md">
+            <button id="btn-import-cred">导入账密</button>
+            <button id="btn-login-all">统一登录</button>
+            <button id="btn-cap-wb">采集 WorkBuddy</button>
+            <button id="btn-cap-tw">采集 TraeWork</button>
+            <button id="btn-paste-tw">粘贴 Trae token</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 账号 -->
+      <section class="page" id="page-accounts">
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>账号操作</h2>
+          </div>
+          <div class="row">
+            <button class="sm" id="btn-import-cred-2">导入账密</button>
+            <button class="sm" id="btn-login-all-2">统一登录</button>
+            <button class="sm" id="btn-cap-wb-2">采集 WorkBuddy</button>
+            <button class="sm" id="btn-cap-tw-2">采集 TraeWork</button>
+            <button class="sm" id="btn-paste-tw-2">粘贴 token</button>
+            <button class="sm" id="btn-upload">上传代跑</button>
+            <button class="sm" id="btn-sync-server">同步代跑凭证</button>
+            <button class="sm" id="btn-wb-tasks">执行 WorkBuddy 任务</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>账号列表</h2>
+          </div>
+          <div class="list" id="acc-list">
+            <div class="empty">暂无账号</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>已存账密</h2>
+          </div>
+          <div class="list" id="cred-list">
+            <div class="empty">暂无账密</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 今日 -->
+      <section class="page" id="page-today">
+        <div class="grid3">
+          <div class="card" style="margin-bottom:0">
+            <div class="label">已跑</div>
+            <div id="list-done" class="hint">—</div>
+          </div>
+          <div class="card" style="margin-bottom:0">
+            <div class="label">未跑</div>
+            <div id="list-pending" class="hint">—</div>
+          </div>
+          <div class="card" style="margin-bottom:0">
+            <div class="label">失败</div>
+            <div id="list-failed" class="hint">—</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 积分 -->
+      <section class="page" id="page-credits">
+        <div class="card">
+          <div class="card-head">
+            <span class="bar"></span>
+            <h2>积分记录</h2>
+            <div class="spacer"></div>
+            <button class="sm danger" id="btn-clear-credits">清理</button>
+          </div>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>产品</th>
+                <th>积分</th>
+                <th>连签</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="credit-body">
+              <tr>
+                <td colspan="5">
+                  <div class="empty">暂无记录</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="page" id="page-settings">
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>授权</h2>
+          </div>
+          <div class="field"><span>授权服务</span><input id="set-base" placeholder="http://..."></div>
+          <div class="field"><span>卡密</span><input id="set-card" type="password" autocomplete="off"></div>
+          <div class="row gap-sm">
+            <button class="primary" id="btn-save-redeem">保存并激活</button>
+            <button id="btn-license-refresh">刷新授权</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>本机选项</h2>
+          </div>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="set-autostart"> 开机自启</label>
+            <label class="chk"><input type="checkbox" id="set-auto"> 早晚调度</label>
+            <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
+            <label class="chk"><input type="checkbox" id="set-trae-capture"> 自动捕获 Trae CN 登录</label>
+          </div>
+          <div class="row gap-md" style="align-items:center">
+            <span class="label" style="margin:0">WorkBuddy 成长任务</span>
+            <select id="set-wb-mode" style="max-width:220px">
+              <option value="off">关闭</option>
+              <option value="local">本机执行</option>
+              <option value="server">服务器代跑</option>
+            </select>
+            <label class="chk"><input type="checkbox" id="set-wb-chat"> 含 AI 对话任务</label>
+          </div>
+          <p class="hint">成长任务：召唤专家、模板、聊天、抽奖、盲盒、派猫猫旅行、连签兑换等，只补未完成项，重复运行不会重复领取。选「服务器代跑」后需重新点一次「上传代跑」才会生效。</p>
+          <p class="hint" id="trae-watch-hint">Trae CN 在本机只保留「最后登录的那一个」账号，切号会覆盖旧登录态；开启后每次登录都会自动入库，无需手动采集。</p>
+          <div class="row gap-md">
+            <button class="sm" id="btn-diagnose-trae">检测 Trae CN 登录态</button>
+          </div>
+          <div class="row gap-md">
+            <button class="sm" id="btn-clear-live">清理实时日志</button>
+            <button class="sm" id="btn-clear-runs">清理跑批日志</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- 公告 / 账号异常通知 -->
+    <div class="modal" id="notice-modal">
+      <div class="panel-box">
+        <div class="mark" id="notice-mark">!</div>
+        <h2 id="notice-title">通知</h2>
+        <p class="lead" id="notice-body" style="white-space:pre-wrap;max-height:280px;overflow:auto"></p>
+        <div class="row gap-md" style="justify-content:flex-end">
+          <button class="sm ghost" id="btn-notice-later">稍后再说</button>
+          <button class="sm" id="btn-notice-ok">知道了</button>
+        </div>
+      </div>
     </div>
-    <div class="logbar" id="log"></div>
+
+    <div class="logbar-wrap">
+      <div class="logbar-head">
+        <span class="label" style="margin:0">运行日志</span>
+
+        <div class="spacer"></div>
+        <button class="sm ghost" id="btn-log-clear">清理</button>
+      </div>
+      <div class="logbar" id="log"></div>
+    </div>
   </div>
-</div>
 
-<script>
-const api = () => window.pywebview && window.pywebview.api;
-const $ = (id) => document.getElementById(id);
-let state = { accounts: [], credentials: [], board: {}, license: {}, settings: {} };
+  <script>
+    const api = () => window.pywebview && window.pywebview.api;
+    const $ = (id) => document.getElementById(id);
+    let state = { accounts: [], credentials: [], board: {}, license: {}, settings: {} };
 
-function logLine(msg, cls = '') {
-  const el = $('log');
-  const div = document.createElement('div');
-  if (cls) div.className = cls;
-  const t = new Date().toLocaleTimeString();
-  div.textContent = `[${t}] ${msg}`;
-  el.prepend(div);
-  while (el.children.length > 200) el.removeChild(el.lastChild);
-}
+    function logLine(msg, cls = '') {
+      const el = $('log');
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      const t = new Date().toLocaleTimeString();
+      div.textContent = `[${t}] ${msg}`;
+      el.prepend(div);
+      while (el.children.length > 200) el.removeChild(el.lastChild);
+    }
 
-async function call(name, ...args) {
-  const a = api();
-  if (!a || !a[name]) throw new Error('界面桥接未就绪，请稍候重试');
-  return await a[name](...args);
-}
+    async function call(name, ...args) {
+      const a = api();
+      if (!a || !a[name]) throw new Error('界面桥接未就绪，请稍候重试');
+      return await a[name](...args);
+    }
 
-function setGate(show, msg) {
-  $('gate').classList.toggle('show', !!show);
-  if (msg) $('gate-msg').textContent = msg;
-}
+    function setGate(show, msg) {
+      $('gate').classList.toggle('show', !!show);
+      if (msg) $('gate-msg').textContent = msg;
+    }
 
-function esc(v) {
-  return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
-}
+    function esc(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
 
-function renderStats(board) {
-  board = board || {};
-  $('home-stats').innerHTML = `
+    function renderStats(board) {
+      board = board || {};
+      $('home-stats').innerHTML = `
     <div class="stat ok"><div class="k">已跑</div><div class="v">${board.done_count || 0}</div></div>
     <div class="stat"><div class="k">未跑</div><div class="v">${board.pending_count || 0}</div></div>
     <div class="stat warn"><div class="k">失败</div><div class="v">${board.failed_count || 0}</div></div>`;
-  $('chip-today').textContent = `今日 ${board.done_count || 0}/${board.total_enabled || 0}`;
-  $('chip-today').className = 'chip ' + (board.failed_count ? 'warn' : 'off');
-  const fill = (id, rows) => {
-    const box = $(id);
-    if (!rows || !rows.length) { box.innerHTML = '<span class="muted">无</span>'; return; }
-    box.innerHTML = rows.map(r =>
-      `<div style="padding:5px 0;border-bottom:1px solid var(--line)">${esc(r.provider)} · ${esc(r.label)} · ${esc(r.today_status || '')}</div>`
-    ).join('');
-  };
-  fill('list-done', board.done);
-  fill('list-pending', board.pending);
-  fill('list-failed', board.failed);
-}
+      $('chip-today').textContent = `今日 ${board.done_count || 0}/${board.total_enabled || 0}`;
+      $('chip-today').className = 'chip ' + (board.failed_count ? 'warn' : 'off');
+      const fill = (id, rows) => {
+        const box = $(id);
+        if (!rows || !rows.length) { box.innerHTML = '<span class="muted">无</span>'; return; }
+        box.innerHTML = rows.map(r =>
+          `<div style="padding:5px 0;border-bottom:1px solid var(--line)">${esc(r.provider)} · ${esc(r.label)} · ${esc(r.today_status || '')}</div>`
+        ).join('');
+      };
+      fill('list-done', board.done);
+      fill('list-pending', board.pending);
+      fill('list-failed', board.failed);
+    }
 
-function renderAccounts(rows) {
-  const box = $('acc-list');
-  if (!rows.length) { box.innerHTML = '<div class="empty">暂无账号，请先在「概览」导入或采集</div>'; return; }
-  box.innerHTML = rows.map(r => `
+    function renderAccounts(rows) {
+      const box = $('acc-list');
+      if (!rows.length) { box.innerHTML = '<div class="empty">暂无账号，请先在「概览」导入或采集</div>'; return; }
+      box.innerHTML = rows.map(r => `
     <div class="item" data-id="${esc(r.id)}">
       <div class="main">
         <div class="title">
@@ -556,7 +1186,7 @@ function renderAccounts(rows) {
           <span class="tag">${esc(r.label || r.id)}</span>
           ${r.token_expired ? '<span class="tag bad">已过期</span>' : ''}
         </div>
-        <div class="meta">${esc(r.run_mode)} · ${esc(r.today_status || '未跑')} · 积分 ${esc(r.last_credits ?? '-')} · 连签 ${esc(r.last_streak ?? '-')}</div>
+        <div class="meta">${r.run_mode === 'server' ? '代跑' : '本机'} · ${esc(r.today_status || '未跑')} · 积分 ${esc(r.last_credits ?? '-')} · 连签 ${esc(r.last_streak ?? '-')}</div>
         ${r.last_error ? `<div class="err">${esc(r.last_error)}</div>` : ''}
       </div>
       <div class="actions">
@@ -566,15 +1196,15 @@ function renderAccounts(rows) {
         <button class="sm danger" data-act="del">删除</button>
       </div>
     </div>`).join('');
-}
+    }
 
-function renderCreds(rows) {
-  const box = $('cred-list');
-  if (!rows.length) { box.innerHTML = '<div class="empty">暂无账密</div>'; return; }
-  box.innerHTML = rows.map(r => {
-    const st = r.last_login_ok === true ? '成功' : r.last_login_ok === false ? '失败' : '未登录';
-    const cls = r.last_login_ok === true ? 'ok' : r.last_login_ok === false ? 'bad' : '';
-    return `
+    function renderCreds(rows) {
+      const box = $('cred-list');
+      if (!rows.length) { box.innerHTML = '<div class="empty">暂无账密</div>'; return; }
+      box.innerHTML = rows.map(r => {
+        const st = r.last_login_ok === true ? '成功' : r.last_login_ok === false ? '失败' : '未登录';
+        const cls = r.last_login_ok === true ? 'ok' : r.last_login_ok === false ? 'bad' : '';
+        return `
     <div class="item" data-cid="${esc(r.id)}">
       <div class="main">
         <div class="title"><span>${esc(r.provider)}</span><span class="tag">${esc(r.username)}</span>
@@ -586,242 +1216,246 @@ function renderCreds(rows) {
         <button class="sm danger" data-cact="del">删除</button>
       </div>
     </div>`;
-  }).join('');
-}
+      }).join('');
+    }
 
-function renderCredits(items) {
-  const body = $('credit-body');
-  if (!items.length) { body.innerHTML = '<tr><td colspan="5"><div class="empty">暂无记录</div></td></tr>'; return; }
-  body.innerHTML = items.map(r => `<tr>
+    function renderCredits(items) {
+      const body = $('credit-body');
+      if (!items.length) { body.innerHTML = '<tr><td colspan="5"><div class="empty">暂无记录</div></td></tr>'; return; }
+      body.innerHTML = items.map(r => `<tr>
     <td>${esc((r.at || '').toString().slice(0, 19).replace('T', ' '))}</td>
     <td>${esc(r.provider)}</td>
     <td>${esc(r.credits ?? '')}</td>
     <td>${esc(r.streak ?? '')}</td>
     <td>${esc(r.message)}</td>
   </tr>`).join('');
-}
-
-function applyLicense(lic) {
-  const valid = !!(lic && lic.valid);
-  const chip = $('chip-license');
-  chip.textContent = valid ? '已授权' : '未授权';
-  chip.className = 'chip ' + (valid ? 'ok' : 'warn');
-  setGate(!valid, lic && lic.message ? lic.message : '请输入卡密完成授权，授权与本机绑定。');
-}
-
-function applySettings(s) {
-  s = s || {};
-  $('set-base').value = s.license_base_url || '';
-  $('set-card').value = s.card_code || '';
-  $('gate-code').value = s.card_code || '';
-  $('set-autostart').checked = !!s.autostart;
-  $('set-auto').checked = s.auto_schedule !== false;
-  $('set-evening').checked = s.evening_schedule !== false;
-  $('set-trae-capture').checked = s.traework_auto_capture !== false;
-  $('set-wb-mode').value = s.workbuddy_task_mode || 'off';
-  $('set-wb-chat').checked = s.workbuddy_chat_tasks !== false;
-}
-
-function applyTraeWatch(w) {
-  w = w || {};
-  const el = $('trae-watch-hint');
-  if (!el) return;
-  const running = !!w.running;
-  el.textContent = running
-    ? `自动捕获运行中：累计入库 ${w.captured || 0} 次${w.last_at ? `，最近 ${w.last_at} ${w.last_message || ''}` : ''}。Trae CN 只保留最后登录的账号，登录后即刻抓取。`
-    : '自动捕获已停止：在下方勾选「自动捕获 Trae CN 登录」并保存后生效。';
-}
-
-async function refreshAll() {
-  const data = await call('get_bootstrap');
-  state = data;
-  $('ver').textContent = 'v' + (data.version || '');
-  applyLicense(data.license || {});
-  applySettings(data.settings || {});
-  applyTraeWatch(data.traework_watch || {});
-  renderStats(data.board || {});
-  renderAccounts(data.accounts || []);
-  renderCreds(data.credentials || []);
-  renderCredits(data.credits || []);
-  (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l)));
-}
-
-async function act(fn, okMsg) {
-  try {
-    const r = await fn();
-    logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
-    if (!r.ok && r.message) alert(r.message);
-    await refreshAll();
-    return r;
-  } catch (e) {
-    logLine(String(e), 'err');
-    alert(String(e));
-  }
-}
-
-document.querySelectorAll('.tab').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    $('page-' + btn.dataset.tab).classList.add('active');
-  });
-});
-
-$('btn-refresh').onclick = () => act(() => call('get_bootstrap'), '已刷新');
-$('btn-run-local').onclick = () => act(() => call('run_local_now'));
-$('btn-refresh-credits').onclick = () => act(() => call('refresh_credits'));
-$('btn-run-server').onclick = () => act(() => call('run_server_now'));
-['btn-import-cred', 'btn-import-cred-2'].forEach(id => $(id).onclick = () => $('modal-cred').classList.add('show'));
-['btn-login-all', 'btn-login-all-2'].forEach(id => $(id).onclick = () => act(() => call('unified_login', '')));
-['btn-cap-wb', 'btn-cap-wb-2'].forEach(id => $(id).onclick = () => act(() => call('capture_workbuddy')));
-['btn-cap-tw', 'btn-cap-tw-2'].forEach(id => $(id).onclick = () => act(() => call('capture_traework')));
-['btn-paste-tw', 'btn-paste-tw-2'].forEach(id => $(id).onclick = () => $('modal-token').classList.add('show'));
-$('btn-upload').onclick = () => act(() => call('upload_delegate', ''));
-$('btn-sync-server').onclick = () => act(() => call('sync_server_credentials'));
-$('btn-wb-tasks').onclick = () => act(() => call('run_workbuddy_tasks'));
-$('btn-cred-cancel').onclick = () => $('modal-cred').classList.remove('show');
-$('btn-token-cancel').onclick = () => $('modal-token').classList.remove('show');
-$('btn-cred-save').onclick = async () => {
-  const batch = $('cred-batch').value.trim();
-  if (batch) {
-    const r = await act(() => call('import_credentials_batch', batch));
-    if (r && r.ok) {
-      $('modal-cred').classList.remove('show');
-      await act(() => call('unified_login', ''));
     }
-    return;
-  }
-  const r = await act(() => call('import_credential', {
-    provider: $('cred-provider').value,
-    username: $('cred-user').value,
-    password: $('cred-pass').value,
-    label: $('cred-label').value,
-    login_now: $('cred-login-now').checked,
-  }));
-  if (r && r.ok) $('modal-cred').classList.remove('show');
-};
-$('btn-token-save').onclick = async () => {
-  const r = await act(() => call('paste_trae_token', $('trae-token').value, $('trae-uid').value));
-  if (r && r.ok) $('modal-token').classList.remove('show');
-};
-$('acc-list').onclick = async (e) => {
-  const btn = e.target.closest('button[data-act]');
-  if (!btn) return;
-  const id = btn.closest('.item').dataset.id;
-  const actName = btn.dataset.act;
-  if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
-  if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
-  if (actName === 'upload') await act(() => call('upload_delegate', id));
-  if (actName === 'del' && confirm('删除该账号？')) await act(() => call('delete_account', id));
-};
-$('cred-list').onclick = async (e) => {
-  const btn = e.target.closest('button[data-cact]');
-  if (!btn) return;
-  const id = btn.closest('.item').dataset.cid;
-  if (btn.dataset.cact === 'login') await act(() => call('unified_login', id));
-  if (btn.dataset.cact === 'del' && confirm('删除该账密？')) await act(() => call('delete_credential', id));
-};
-$('btn-save-redeem').onclick = async () => {
-  await call('save_settings', {
-    license_base_url: $('set-base').value.trim(),
-    card_code: $('set-card').value.trim(),
-    autostart: $('set-autostart').checked,
-    auto_schedule: $('set-auto').checked,
-    evening_schedule: $('set-evening').checked,
-    traework_auto_capture: $('set-trae-capture').checked,
-    workbuddy_task_mode: $('set-wb-mode').value,
-    workbuddy_chat_tasks: $('set-wb-chat').checked,
-  });
-  await act(() => call('redeem', $('set-card').value.trim()));
-};
-$('btn-notice-ok').onclick = () => closeNotice(true);
-$('btn-notice-later').onclick = () => closeNotice(false);
-$('btn-diagnose-trae').onclick = async () => {
-  const r = await act(() => call('diagnose_traework'));
-  (r.details || []).forEach(l => logLine(l, r.ok ? 'ok' : 'err'));
-  if (r.watch) applyTraeWatch(r.watch);
-};
-$('btn-license-refresh').onclick = () => act(() => call('refresh_license'));
-$('btn-gate-redeem').onclick = async () => {
-  await call('save_settings', { card_code: $('gate-code').value.trim() });
-  await act(() => call('redeem', $('gate-code').value.trim()));
-};
-$('btn-gate-refresh').onclick = () => act(() => call('refresh_license'));
-$('btn-clear-credits').onclick = async () => { if (confirm('清理积分记录？')) await act(() => call('clear_credits')); };
-$('btn-clear-live').onclick = async () => { if (confirm('清理实时日志？')) { await call('clear_live_logs'); $('log').innerHTML = ''; } };
-$('btn-clear-runs').onclick = async () => { if (confirm('清理跑批日志？')) await act(() => call('clear_run_logs')); };
-$('btn-log-clear').onclick = async () => { await call('clear_live_logs'); $('log').innerHTML = ''; };
 
-async function poll() {
-  try {
-    const r = await call('poll_logs');
-    (r.lines || []).forEach(l => logLine(l, /失败|错误|异常/.test(l) ? 'err' : 'ok'));
-  } catch (_) { }
-  setTimeout(poll, 1500);
-}
+    function applyLicense(lic) {
+      const valid = !!(lic && lic.valid);
+      const chip = $('chip-license');
+      chip.textContent = valid ? '已授权' : '未授权';
+      chip.className = 'chip ' + (valid ? 'ok' : 'warn');
+      const accountLimit = lic && lic.accountLimit != null ? lic.accountLimit : '无限制';
+      $('chip-account-limit').textContent = `账号限制：${accountLimit}`;
+      $('chip-account-limit').className = 'chip ' + (accountLimit !== '无限制' && valid ? 'ok' : 'off');
+      setGate(!valid, lic && lic.message ? lic.message : '请输入卡密完成授权，授权与本机绑定。');
+    }
 
-/* ---------- 公告 / 账号异常通知 ---------- */
-let noticeQueue = [];
-const noticeSeen = new Set();
+    function applySettings(s) {
+      s = s || {};
+      $('set-base').value = s.license_base_url || '';
+      $('set-card').value = s.card_code || '';
+      $('gate-code').value = s.card_code || '';
+      $('set-autostart').checked = !!s.autostart;
+      $('set-auto').checked = s.auto_schedule !== false;
+      $('set-evening').checked = s.evening_schedule !== false;
+      $('set-trae-capture').checked = s.traework_auto_capture !== false;
+      $('set-wb-mode').value = s.workbuddy_task_mode || 'off';
+      $('set-wb-chat').checked = s.workbuddy_chat_tasks !== false;
+    }
 
-async function pollNotices() {
-  try {
-    const r = await call('notices');
-    const fresh = (r.items || []).filter(it => it && it.key && !noticeSeen.has(it.key));
-    fresh.forEach(it => {
-      noticeSeen.add(it.key);
-      noticeQueue.push(it);
-      logLine(`[通知] ${it.title || '通知'}：${it.content || ''}`, it.level === 'urgent' ? 'err' : 'ok');
+    function applyTraeWatch(w) {
+      w = w || {};
+      const el = $('trae-watch-hint');
+      if (!el) return;
+      const running = !!w.running;
+      el.textContent = running
+        ? `自动捕获运行中：累计入库 ${w.captured || 0} 次${w.last_at ? `，最近 ${w.last_at} ${w.last_message || ''}` : ''}。Trae CN 只保留最后登录的账号，登录后即刻抓取。`
+        : '自动捕获已停止：在下方勾选「自动捕获 Trae CN 登录」并保存后生效。';
+    }
+
+    async function refreshAll() {
+      const data = await call('get_bootstrap');
+      state = data;
+      $('ver').textContent = 'v' + (data.version || '');
+      applyLicense(data.license || {});
+      applySettings(data.settings || {});
+      applyTraeWatch(data.traework_watch || {});
+      renderStats(data.board || {});
+      renderAccounts(data.accounts || []);
+      renderCreds(data.credentials || []);
+      renderCredits(data.credits || []);
+      (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l)));
+    }
+
+    async function act(fn, okMsg) {
+      try {
+        const r = await fn();
+        logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
+        if (!r.ok && r.message) alert(r.message);
+        await refreshAll();
+        return r;
+      } catch (e) {
+        logLine(String(e), 'err');
+        alert(String(e));
+      }
+    }
+
+    document.querySelectorAll('.tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        $('page-' + btn.dataset.tab).classList.add('active');
+      });
     });
-    if (fresh.length) showNextNotice();
-  } catch (_) { }
-  setTimeout(pollNotices, 180000);
-}
 
-function showNextNotice() {
-  const box = $('notice-modal');
-  if (!box) return;
-  if (!noticeQueue.length) { box.classList.remove('show'); return; }
-  const it = noticeQueue[0];
-  $('notice-title').textContent = it.title || '通知';
-  $('notice-body').textContent = it.content || '';
-  $('notice-mark').textContent = it.level === 'urgent' ? '!' : (it.level === 'warn' ? '!' : 'i');
-  box.classList.add('show');
-}
+    $('btn-refresh').onclick = () => act(() => call('get_bootstrap'), '已刷新');
+    $('btn-run-local').onclick = () => act(() => call('run_local_now'));
+    $('btn-refresh-credits').onclick = () => act(() => call('refresh_credits'));
+    $('btn-run-server').onclick = () => act(() => call('run_server_now'));
+    ['btn-import-cred', 'btn-import-cred-2'].forEach(id => $(id).onclick = () => $('modal-cred').classList.add('show'));
+    ['btn-login-all', 'btn-login-all-2'].forEach(id => $(id).onclick = () => act(() => call('unified_login', '')));
+    ['btn-cap-wb', 'btn-cap-wb-2'].forEach(id => $(id).onclick = () => act(() => call('capture_workbuddy')));
+    ['btn-cap-tw', 'btn-cap-tw-2'].forEach(id => $(id).onclick = () => act(() => call('capture_traework')));
+    ['btn-paste-tw', 'btn-paste-tw-2'].forEach(id => $(id).onclick = () => $('modal-token').classList.add('show'));
+    $('btn-upload').onclick = () => act(() => call('upload_delegate', ''));
+    $('btn-sync-server').onclick = () => act(() => call('sync_server_credentials'));
+    $('btn-wb-tasks').onclick = () => act(() => call('run_workbuddy_tasks'));
+    $('btn-cred-cancel').onclick = () => $('modal-cred').classList.remove('show');
+    $('btn-token-cancel').onclick = () => $('modal-token').classList.remove('show');
+    $('btn-cred-save').onclick = async () => {
+      const batch = $('cred-batch').value.trim();
+      if (batch) {
+        const r = await act(() => call('import_credentials_batch', batch));
+        if (r && r.ok) {
+          $('modal-cred').classList.remove('show');
+          await act(() => call('unified_login', ''));
+        }
+        return;
+      }
+      const r = await act(() => call('import_credential', {
+        provider: $('cred-provider').value,
+        username: $('cred-user').value,
+        password: $('cred-pass').value,
+        label: $('cred-label').value,
+        login_now: $('cred-login-now').checked,
+      }));
+      if (r && r.ok) $('modal-cred').classList.remove('show');
+    };
+    $('btn-token-save').onclick = async () => {
+      const r = await act(() => call('paste_trae_token', $('trae-token').value, $('trae-uid').value));
+      if (r && r.ok) $('modal-token').classList.remove('show');
+    };
+    $('acc-list').onclick = async (e) => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      const id = btn.closest('.item').dataset.id;
+      const actName = btn.dataset.act;
+      if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
+      if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
+      if (actName === 'upload') await act(() => call('upload_delegate', id));
+      if (actName === 'del' && confirm('删除该账号？')) await act(() => call('delete_account', id));
+    };
+    $('cred-list').onclick = async (e) => {
+      const btn = e.target.closest('button[data-cact]');
+      if (!btn) return;
+      const id = btn.closest('.item').dataset.cid;
+      if (btn.dataset.cact === 'login') await act(() => call('unified_login', id));
+      if (btn.dataset.cact === 'del' && confirm('删除该账密？')) await act(() => call('delete_credential', id));
+    };
+    $('btn-save-redeem').onclick = async () => {
+      await call('save_settings', {
+        license_base_url: $('set-base').value.trim(),
+        card_code: $('set-card').value.trim(),
+        autostart: $('set-autostart').checked,
+        auto_schedule: $('set-auto').checked,
+        evening_schedule: $('set-evening').checked,
+        traework_auto_capture: $('set-trae-capture').checked,
+        workbuddy_task_mode: $('set-wb-mode').value,
+        workbuddy_chat_tasks: $('set-wb-chat').checked,
+      });
+      await act(() => call('redeem', $('set-card').value.trim()));
+    };
+    $('btn-notice-ok').onclick = () => closeNotice(true);
+    $('btn-notice-later').onclick = () => closeNotice(false);
+    $('btn-diagnose-trae').onclick = async () => {
+      const r = await act(() => call('diagnose_traework'));
+      (r.details || []).forEach(l => logLine(l, r.ok ? 'ok' : 'err'));
+      if (r.watch) applyTraeWatch(r.watch);
+    };
+    $('btn-license-refresh').onclick = () => act(() => call('refresh_license'));
+    $('btn-gate-redeem').onclick = async () => {
+      await call('save_settings', { card_code: $('gate-code').value.trim() });
+      await act(() => call('redeem', $('gate-code').value.trim()));
+    };
+    $('btn-gate-refresh').onclick = () => act(() => call('refresh_license'));
+    $('btn-clear-credits').onclick = async () => { if (confirm('清理积分记录？')) await act(() => call('clear_credits')); };
+    $('btn-clear-live').onclick = async () => { if (confirm('清理实时日志？')) { await call('clear_live_logs'); $('log').innerHTML = ''; } };
+    $('btn-clear-runs').onclick = async () => { if (confirm('清理跑批日志？')) await act(() => call('clear_run_logs')); };
+    $('btn-log-clear').onclick = async () => { await call('clear_live_logs'); $('log').innerHTML = ''; };
 
-function closeNotice(ack) {
-  const it = noticeQueue.shift();
-  $('notice-modal').classList.remove('show');
-  if (it && ack) { try { call('ack_notices', { keys: [it.key] }); } catch (_) { } }
-  setTimeout(showNextNotice, 220);
-}
+    async function poll() {
+      try {
+        const r = await call('poll_logs');
+        (r.lines || []).forEach(l => logLine(l, /失败|错误|异常/.test(l) ? 'err' : 'ok'));
+      } catch (_) { }
+      setTimeout(poll, 1500);
+    }
 
-let lastCaptured = -1;
-async function pollTrae() {
-  try {
-    const r = await call('traework_watch_status');
-    const w = r.watch || {};
-    applyTraeWatch(w);
-    if (lastCaptured >= 0 && (w.captured || 0) !== lastCaptured) await refreshAll();
-    lastCaptured = w.captured || 0;
-  } catch (_) { }
-  setTimeout(pollTrae, 10000);
-}
+    /* ---------- 公告 / 账号异常通知 ---------- */
+    let noticeQueue = [];
+    const noticeSeen = new Set();
 
-async function boot() {
-  try {
-    await refreshAll();
-    poll();
-    pollTrae();
-    pollNotices();
-  } catch (e) {
-    logLine(String(e), 'err');
-  }
-}
+    async function pollNotices() {
+      try {
+        const r = await call('notices');
+        const fresh = (r.items || []).filter(it => it && it.key && !noticeSeen.has(it.key));
+        fresh.forEach(it => {
+          noticeSeen.add(it.key);
+          noticeQueue.push(it);
+          logLine(`[通知] ${it.title || '通知'}：${it.content || ''}`, it.level === 'urgent' ? 'err' : 'ok');
+        });
+        if (fresh.length) showNextNotice();
+      } catch (_) { }
+      setTimeout(pollNotices, 180000);
+    }
 
-if (window.pywebview && window.pywebview.api) { boot(); }
-else { window.addEventListener('pywebviewready', boot); }
-</script>
+    function showNextNotice() {
+      const box = $('notice-modal');
+      if (!box) return;
+      if (!noticeQueue.length) { box.classList.remove('show'); return; }
+      const it = noticeQueue[0];
+      $('notice-title').textContent = it.title || '通知';
+      $('notice-body').textContent = it.content || '';
+      $('notice-mark').textContent = it.level === 'urgent' ? '!' : (it.level === 'warn' ? '!' : 'i');
+      box.classList.add('show');
+    }
+
+    function closeNotice(ack) {
+      const it = noticeQueue.shift();
+      $('notice-modal').classList.remove('show');
+      if (it && ack) { try { call('ack_notices', { keys: [it.key] }); } catch (_) { } }
+      setTimeout(showNextNotice, 220);
+    }
+
+    let lastCaptured = -1;
+    async function pollTrae() {
+      try {
+        const r = await call('traework_watch_status');
+        const w = r.watch || {};
+        applyTraeWatch(w);
+        if (lastCaptured >= 0 && (w.captured || 0) !== lastCaptured) await refreshAll();
+        lastCaptured = w.captured || 0;
+      } catch (_) { }
+      setTimeout(pollTrae, 10000);
+    }
+
+    async function boot() {
+      try {
+        await refreshAll();
+        poll();
+        pollTrae();
+        pollNotices();
+      } catch (e) {
+        logLine(String(e), 'err');
+      }
+    }
+
+    if (window.pywebview && window.pywebview.api) { boot(); }
+    else { window.addEventListener('pywebviewready', boot); }
+  </script>
 </body>
+
 </html>

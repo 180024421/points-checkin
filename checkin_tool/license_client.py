@@ -312,6 +312,7 @@ def _cache_from_data(data: dict[str, Any], app_key: str) -> dict[str, Any]:
         "message": data.get("message") or "",
         "deviceCount": data.get("deviceCount"),
         "maxDevices": data.get("maxDevices"),
+        "accountLimit": data.get("accountLimit"), # 新增：从服务端获取的账号限制
         "ticket": data.get("ticket") or "",
         "ticketExpireAt": data.get("ticketExpireAt"),
         "updatedAt": _now_iso(),

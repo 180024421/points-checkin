@@ -8,6 +8,8 @@ from typing import Any
 
 from .license_client import data_root
 from .secure_storage import load_json, save_json
+from .license_client import check_status # Import check_status
+from . import server_client # Import server_client
 
 ACCOUNTS_FILE = data_root() / "accounts.json"
 RUN_LOG_FILE = data_root() / "run_log.json"
@@ -22,15 +24,39 @@ _IO_LOCK = threading.RLock()
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def get_account_limit() -> int | None:
+    """获取用户当前账户限制数量"""
+    # 实际使用时需要传入 settings，这里暂时用空字典模拟
+    # TODO: 从合适的地方获取 settings 传入
+    status_result = check_status({}, force_online=False) 
+    license_info = status_result.get("license")
+    if license_info and "accountLimit" in license_info:
+        return license_info["accountLimit"]
+    return None
+
+
 
 def _today_local() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
 def load_accounts() -> list[dict[str, Any]]:
-    data = load_json(ACCOUNTS_FILE, {"accounts": []})
-    accounts = data.get("accounts") if isinstance(data, dict) else []
-    return accounts if isinstance(accounts, list) else []
+    local_accounts_data = load_json(ACCOUNTS_FILE, {"accounts": []})
+    local_accounts = local_accounts_data.get("accounts") if isinstance(local_accounts_data, dict) else []
+    if not isinstance(local_accounts, list):
+        local_accounts = []
+
+    server_accounts = server_client.list_server_accounts() # 从服务端获取代跑账户
+
+    # 合并账户，以服务端账户为准
+    all_accounts_map: dict[str, dict[str, Any]] = {}
+    for acc in local_accounts:
+        all_accounts_map[str(acc.get("id"))] = acc
+    for acc in server_accounts:
+        all_accounts_map[str(acc.get("id"))] = acc
+    
+    return list(all_accounts_map.values())
+
 
 
 def save_accounts(accounts: list[dict[str, Any]]) -> None:
@@ -62,6 +88,8 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
     identity = account_identity_key(account)
     account["identity"] = identity.split(":", 1)[-1] if ":" in identity else identity
     account["updatedAt"] = _now()
+    if "run_mode" not in account:
+        account["run_mode"] = "local"
     if "createdAt" not in account:
         account["createdAt"] = _now()
 
@@ -90,6 +118,9 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
         accounts[idx] = merged
         account = merged
     else:
+        account_limit = get_account_limit()
+        if account_limit is not None and len(accounts) >= account_limit:
+            raise ValueError(f"超出账户数量限制：当前 {len(accounts)}，限制 {account_limit}")
         accounts.append(account)
     save_accounts(accounts)
     return account
@@ -211,6 +242,8 @@ def today_run_map() -> dict[str, dict[str, Any]]:
     """account_id -> {status, credits, message, ok} for local day."""
     day = _today_local()
     out: dict[str, dict[str, Any]] = {}
+
+    # 加载本地运行日志
     for row in load_run_logs(limit=1000):
         row_day = str(row.get("day") or "")
         if not row_day:
@@ -221,23 +254,42 @@ def today_run_map() -> dict[str, dict[str, Any]]:
         aid = str(row.get("account_id") or "")
         if not aid or aid in out:
             continue
-        ok = bool(row.get("ok"))
-        already = bool(row.get("already"))
-        if ok and already:
-            status = "已签(之前)"
-        elif ok:
-            status = "已跑成功"
-        else:
-            status = "失败"
-        out[aid] = {
-            "status": status,
-            "credits": row.get("credits"),
-            "message": row.get("message") or "",
-            "ok": ok,
-            "already": already,
-            "at": row.get("at"),
-        }
+        out[aid] = _process_run_log_entry(row)
+    
+    # 加载服务器端运行日志并合并，服务器端数据优先
+    server_runs = server_client.fetch_aggregated_checkin_data()
+    for row in server_runs:
+        row_day = str(row.get("day") or "")
+        if not row_day:
+            at = str(row.get("at") or "")
+            row_day = at[:10] if len(at) >= 10 else ""
+        if row_day != day:
+            continue
+        aid = str(row.get("account_id") or "")
+        if not aid:
+            continue
+        out[aid] = _process_run_log_entry(row) # 服务器数据覆盖本地数据
+
     return out
+
+def _process_run_log_entry(row: dict[str, Any]) -> dict[str, Any]:
+    ok = bool(row.get("ok"))
+    already = bool(row.get("already"))
+    if ok and already:
+        status = "已签(之前)"
+    elif ok:
+        status = "已跑成功"
+    else:
+        status = "失败"
+    return {
+        "status": status,
+        "credits": row.get("credits"),
+        "message": row.get("message") or "",
+        "ok": ok,
+        "already": already,
+        "at": row.get("at"),
+        "run_mode": row.get("run_mode") or "local", # 记录运行模式
+    }
 
 
 def today_board() -> dict[str, Any]:
