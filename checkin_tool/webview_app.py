@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__, account_store, autostart, credential_store, server_client
 from .adapters import traework, workbuddy
-from .license_client import check_status, ensure_licensed, redeem
+from .license_client import check_status, clear_cache, ensure_licensed, redeem
+from .license_guard import LicenseGuard
 from .login import login_by_id
 from .scheduler import (
     DailyScheduler,
@@ -52,8 +54,44 @@ class CheckinApi:
         if self.settings.get("traework_auto_capture", True):
             self.traework_watch.start()
             self._append_log("已启用 Trae CN 登录态自动捕获（登录后无需手动采集）")
+        # 授权守卫：定时在线校验，卡密失效立即踢出登录
+        self._revoked: dict[str, Any] | None = None
+        check_interval = float(self.settings.get("license_check_interval") or 300)
+        self.license_guard = LicenseGuard(
+            get_settings=lambda: self.settings,
+            on_revoked=self._on_license_revoked,
+            log=self._append_log,
+            interval_sec=check_interval,
+        )
+        self.license_guard.start()
+        self._append_log(
+            f"已启用授权守卫（每 {int(check_interval / 60) or 5} 分钟在线校验，卡密失效自动退出登录）"
+        )
+
+    def _on_license_revoked(self, reason: str) -> None:
+        """卡密失效：踢出登录 —— 停后台任务 + 清本机票据 + 前端弹回激活门禁。"""
+        self._revoked = {"reason": reason, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        for name, stop in (
+            ("自动签到调度", self.scheduler.stop),
+            ("Trae 登录态捕获", self.traework_watch.stop),
+        ):
+            try:
+                stop()
+                self._append_log(f"已停止{name}")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            clear_cache()  # 清掉本机（含两处镜像）票据，后续任何操作都会被门禁拦截
+            self._append_log("已清除本机授权票据")
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"[!] 清除授权票据失败：{exc}")
+        self._append_log(f"请重新输入有效卡密后继续使用（原因：{reason}）")
 
     def stop_background(self) -> None:
+        try:
+            self.license_guard.stop()
+        except Exception:
+            pass
         try:
             self.traework_watch.stop()
         except Exception:
@@ -91,6 +129,9 @@ class CheckinApi:
             },
             "traework_watch": self.traework_watch.status(),
             "license": license_info,
+            "revoked": self._revoked,  # 非空 = 卡密已失效被踢出，前端弹回门禁并提示
+            "accountUsage": account_store.get_account_usage(),
+            "licenseGuard": self.license_guard.status(),
             "board": account_store.today_board(),
             "accounts": self.list_accounts().get("accounts") or [],
             "logs": list(reversed(account_store.load_live_logs(120))),
@@ -128,7 +169,19 @@ class CheckinApi:
     def refresh_license(self) -> dict[str, Any]:
         result = check_status(self.settings, force_online=True)
         self._append_log(f"授权: valid={result.get('valid')} {result.get('message')}")
-        return {"ok": True, "license": result}
+        return {"ok": True, "license": result, "revoked": self._revoked}
+
+    def license_check_now(self) -> dict[str, Any]:
+        """手动触发一次授权校验（含踢出判定），供前端「立即校验」按钮使用。"""
+        out = self.license_guard.check_now()
+        return {"ok": True, **out, "revoked": self._revoked}
+
+    def license_guard_status(self) -> dict[str, Any]:
+        return {"ok": True, "guard": self.license_guard.status(), "revoked": self._revoked}
+
+    def account_usage(self) -> dict[str, Any]:
+        """套餐与账号用量：{limit, used, remain, planLabel, expireAt}。"""
+        return {"ok": True, "usage": account_store.get_account_usage()}
 
     def save_settings(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}

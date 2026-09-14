@@ -25,14 +25,53 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def get_account_limit() -> int | None:
-    """获取用户当前账户限制数量"""
-    # 实际使用时需要传入 settings，这里暂时用空字典模拟
-    # TODO: 从合适的地方获取 settings 传入
-    status_result = check_status({}, force_online=False) 
-    license_info = status_result.get("license")
-    if license_info and "accountLimit" in license_info:
-        return license_info["accountLimit"]
-    return None
+    """可代挂账号数上限（按账号数计费）。
+
+    直接读授权缓存（由 license_client.check_status 写入，离线可用）；
+    不再用空 settings 发起请求（旧实现传 {}，会走默认服务地址导致判断失真）。
+    None = 不限（未取到额度时不阻断用户）。
+    """
+    try:
+        from .license_client import load_cache
+
+        limit = load_cache().get("accountLimit")
+        if limit is None:
+            return None
+        limit = int(limit)
+        return limit if limit > 0 else None
+    except Exception:
+        return None
+
+
+def get_account_usage() -> dict[str, Any]:
+    """供界面展示：{limit, used, remain, planLabel, expireAt}。"""
+    limit = get_account_limit()
+    used = 0
+    plan_label = ""
+    expire_at = None
+    try:
+        from .license_client import load_cache
+
+        cache = load_cache()
+        plan_label = str(cache.get("accountPlanLabel") or cache.get("planLabel") or "")
+        expire_at = cache.get("expireAt")
+        raw_used = cache.get("accountUsed")
+        if raw_used is not None:
+            used = int(raw_used)
+    except Exception:
+        pass
+    if used <= 0:
+        try:
+            used = sum(1 for a in load_accounts() if a.get("enabled", True))
+        except Exception:
+            used = 0
+    return {
+        "limit": limit,
+        "used": used,
+        "remain": None if limit is None else max(limit - used, 0),
+        "planLabel": plan_label,
+        "expireAt": expire_at,
+    }
 
 
 
@@ -113,14 +152,31 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
         account_id = str(uuid.uuid4())
     account["id"] = account_id
 
+    def _enabled_count(rows: list[dict[str, Any]]) -> int:
+        return sum(1 for r in rows if r.get("enabled", True))
+
+    account_limit = get_account_limit()
     if idx >= 0:
+        was_enabled = bool(accounts[idx].get("enabled", True))
         merged = {**accounts[idx], **account}
         accounts[idx] = merged
         account = merged
+        # 从禁用切回启用也要占用额度（额度按「启用中的账号数」计）
+        if not was_enabled and bool(merged.get("enabled", True)) and account_limit is not None:
+            enabled_now = _enabled_count(accounts)
+            if enabled_now > account_limit:
+                raise ValueError(
+                    f"超出账号数量上限：启用后将有 {enabled_now} 个，"
+                    f"当前套餐仅支持 {account_limit} 个（升级套餐可增加）"
+                )
     else:
-        account_limit = get_account_limit()
-        if account_limit is not None and len(accounts) >= account_limit:
-            raise ValueError(f"超出账户数量限制：当前 {len(accounts)}，限制 {account_limit}")
+        if account_limit is not None:
+            enabled_now = _enabled_count(accounts)
+            if enabled_now >= account_limit:
+                raise ValueError(
+                    f"超出账号数量上限：当前已启用 {enabled_now} 个，"
+                    f"套餐上限 {account_limit} 个（升级套餐或先停用部分账号）"
+                )
         accounts.append(account)
     save_accounts(accounts)
     return account

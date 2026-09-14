@@ -1231,14 +1231,27 @@
   </tr>`).join('');
     }
 
-    function applyLicense(lic) {
+    let revokedNotified = '';
+
+    function applyLicense(lic, usage) {
       const valid = !!(lic && lic.valid);
       const chip = $('chip-license');
       chip.textContent = valid ? '已授权' : '未授权';
       chip.className = 'chip ' + (valid ? 'ok' : 'warn');
-      const accountLimit = lic && lic.accountLimit != null ? lic.accountLimit : '无限制';
-      $('chip-account-limit').textContent = `账号限制：${accountLimit}`;
-      $('chip-account-limit').className = 'chip ' + (accountLimit !== '无限制' && valid ? 'ok' : 'off');
+      // 按账号数计费：展示套餐 + 已用/上限
+      const limit = (lic && lic.accountLimit != null) ? Number(lic.accountLimit) : null;
+      const used = (usage && usage.used != null)
+        ? Number(usage.used)
+        : ((lic && lic.accountUsed != null) ? Number(lic.accountUsed) : 0);
+      const plan = (usage && usage.planLabel) || (lic && lic.accountPlanLabel) || '';
+      const limitText = limit === null ? '不限账号' : `${limit} 个账号`;
+      if (limit !== null) {
+        $('chip-account-limit').textContent = `套餐：${plan ? plan + ' · ' : ''}${limitText}（已用 ${used}/${limit}）`;
+      } else {
+        $('chip-account-limit').textContent = `套餐：${plan || '未配置'} · ${limitText}`;
+      }
+      const over = limit !== null && used > limit;
+      $('chip-account-limit').className = 'chip ' + (valid ? (over ? 'warn' : 'ok') : 'off');
       setGate(!valid, lic && lic.message ? lic.message : '请输入卡密完成授权，授权与本机绑定。');
     }
 
@@ -1269,7 +1282,15 @@
       const data = await call('get_bootstrap');
       state = data;
       $('ver').textContent = 'v' + (data.version || '');
-      applyLicense(data.license || {});
+      applyLicense(data.license || {}, data.accountUsage || {});
+      // 卡密失效被踢出：只弹一次提示（后台守卫会同步停掉签到并清票据）
+      const revoked = data.revoked || null;
+      if (revoked && revoked.at !== revokedNotified) {
+        revokedNotified = revoked.at || '';
+        setTimeout(function () {
+          alert('卡密已失效，已退出登录。\n原因：' + (revoked.reason || '') + '\n\n请重新输入有效卡密后继续使用。');
+        }, 120);
+      }
       applySettings(data.settings || {});
       applyTraeWatch(data.traework_watch || {});
       renderStats(data.board || {});
@@ -1375,12 +1396,12 @@
       (r.details || []).forEach(l => logLine(l, r.ok ? 'ok' : 'err'));
       if (r.watch) applyTraeWatch(r.watch);
     };
-    $('btn-license-refresh').onclick = () => act(() => call('refresh_license'));
+    $('btn-license-refresh').onclick = () => act(() => call('license_check_now'));
     $('btn-gate-redeem').onclick = async () => {
       await call('save_settings', { card_code: $('gate-code').value.trim() });
       await act(() => call('redeem', $('gate-code').value.trim()));
     };
-    $('btn-gate-refresh').onclick = () => act(() => call('refresh_license'));
+    $('btn-gate-refresh').onclick = () => act(() => call('license_check_now'));
     $('btn-clear-credits').onclick = async () => { if (confirm('清理积分记录？')) await act(() => call('clear_credits')); };
     $('btn-clear-live').onclick = async () => { if (confirm('清理实时日志？')) { await call('clear_live_logs'); $('log').innerHTML = ''; } };
     $('btn-clear-runs').onclick = async () => { if (confirm('清理跑批日志？')) await act(() => call('clear_run_logs')); };
