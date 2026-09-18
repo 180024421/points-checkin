@@ -37,6 +37,8 @@ def default_settings() -> dict[str, Any]:
         "workbuddy_task_mode": "off",
         # 是否执行需要真实 AI 对话的任务（和AI聊天5次 / GLM对话 / 专家团 / 夜猫子）
         "workbuddy_chat_tasks": True,
+        "run_jane_base_url": "http://localhost:8687", # Placeholder for run-jane API base URL
+        "run_jane_api_token": "", # API token for run-jane Open APIs
     }
 
 

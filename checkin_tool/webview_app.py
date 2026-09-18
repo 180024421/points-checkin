@@ -9,6 +9,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+import zipfile
 
 from . import __version__, account_store, autostart, credential_store, server_client
 from .adapters import traework, workbuddy
@@ -78,8 +79,8 @@ class CheckinApi:
             try:
                 stop()
                 self._append_log(f"已停止{name}")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:
+                self._append_log(f"Error stopping task {name}: {e}")
         try:
             clear_cache()  # 清掉本机（含两处镜像）票据，后续任何操作都会被门禁拦截
             self._append_log("已清除本机授权票据")
@@ -90,16 +91,16 @@ class CheckinApi:
     def stop_background(self) -> None:
         try:
             self.license_guard.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            self._append_log(f"Error stopping service: {e}")
         try:
             self.traework_watch.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            self._append_log(f"Error stopping service: {e}")
         try:
             self.scheduler.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            self._append_log(f"Error stopping service: {e}")
 
     def _append_log(self, msg: str) -> None:
         text = str(msg).rstrip()
@@ -135,11 +136,72 @@ class CheckinApi:
             "board": account_store.today_board(),
             "accounts": self.list_accounts().get("accounts") or [],
             "logs": list(reversed(account_store.load_live_logs(120))),
-            "credits": account_store.load_credit_history(limit=80),
+
             "credentials": [
                 credential_store.public_credential_view(r) for r in credential_store.load_credentials()
             ],
         }
+
+    def backup_data(self) -> dict[str, Any]:
+        """备份所有数据文件到一个zip文件。"""
+        try:
+            backup_dir = account_store.data_root() / "backup"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup_filename = f"checkintool_backup_{timestamp}.zip"
+            backup_path = backup_dir / backup_filename
+
+            files_to_backup = [
+                account_store.ACCOUNTS_FILE,
+                account_store.RUN_LOG_FILE,
+                account_store.LIVE_LOG_FILE,
+                account_store.CREDIT_HISTORY_FILE,
+                license_client.LICENSE_CACHE,
+                license_client.DEVICE_ID_FILE,
+            ]
+
+            with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path in files_to_backup:
+                    if file_path.exists():
+                        zipf.write(file_path, arcname=file_path.name)
+            
+            self._append_log(f"数据已备份到: {backup_path}")
+            return {"ok": True, "message": f"数据已备份到: {backup_path}", "path": str(backup_path)}
+        except Exception as exc:
+            self._append_log(f"数据备份失败: {exc}")
+            return {"ok": False, "message": f"数据备份失败: {exc}"}
+
+    def restore_data(self, backup_file_path: str) -> dict[str, Any]:
+        """从备份文件恢复数据。"""
+        try:
+            backup_path = Path(backup_file_path)
+            if not backup_path.is_file():
+                return {"ok": False, "message": "备份文件不存在。"}
+            
+            data_root_path = account_store.data_root()
+
+            with zipfile.ZipFile(backup_path, 'r') as zipf:
+                for member in zipf.namelist():
+                    # 确保只解压到数据根目录，防止路径遍历攻击
+                    member_path = Path(data_root_path) / Path(member).name
+                    # 避免恢复license_cache.json，因为它可能包含敏感信息且在恢复后应该重新验证
+                    # 避免恢复device_id.txt，因为它与设备绑定，恢复后可能导致设备数统计问题
+                    if member_path.name in ["license_cache.json", "device_id.txt"]:
+                        self._append_log(f"跳过恢复敏感文件: {member_path.name}")
+                        continue
+                    
+                    # 提取文件，目标路径是data_root_path
+                    # zipfile.extract() 默认会将文件提取到当前工作目录，这里需要指定path参数
+                    # 为了避免路径遍历漏洞，我们只提取文件名，并确保目标路径在data_root_path内
+                    extracted_file_path = data_root_path / Path(member).name
+                    with open(extracted_file_path, "wb") as outfile:
+                        outfile.write(zipf.read(member))
+            
+            self._append_log(f"数据已从 {backup_file_path} 恢复。请重启应用以使更改生效。")
+            return {"ok": True, "message": "数据已恢复。请重启应用以使更改生效。"}
+        except Exception as exc:
+            self._append_log(f"数据恢复失败: {exc}")
+            return {"ok": False, "message": f"数据恢复失败: {exc}"}
 
     def poll_logs(self) -> dict[str, Any]:
         with self._lock:
@@ -155,8 +217,13 @@ class CheckinApi:
     def today_board(self) -> dict[str, Any]:
         return {"ok": True, "board": account_store.today_board()}
 
-    def credit_history(self) -> dict[str, Any]:
-        return {"ok": True, "items": account_store.load_credit_history(limit=200)}
+    def credit_history(self, account_id: str | None = None) -> dict[str, Any]:
+        """获取积分历史，支持按账号ID筛选。"""
+        return {"ok": True, "items": account_store.load_credit_history(account_id=account_id, limit=200)}
+
+    def run_logs(self, account_id: str | None = None) -> dict[str, Any]:
+        """获取运行日志，支持按账号ID筛选。"""
+        return {"ok": True, "items": account_store.load_run_logs(account_id=account_id, limit=200)}
 
     def list_credentials(self) -> dict[str, Any]:
         return {
@@ -240,22 +307,32 @@ class CheckinApi:
         if not auths:
             return {"ok": False, "message": err or "无登录态"}
         labels = []
+        replacement_suggestion = None # 初始化建议
         for auth in auths:
-            account_store.upsert_account(
-                {
-                    "provider": "workbuddy",
-                    "label": auth.get("nickname") or auth.get("uid"),
-                    "identity": auth.get("uid"),
-                    "run_mode": "local",
-                    "enabled": True,
-                    "token_blob": auth,
-                    "last_error": "",
-                }
-            )
+            account_data = {
+                "provider": "workbuddy",
+                "label": auth.get("nickname") or auth.get("uid"),
+                "identity": auth.get("uid"),
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": auth,
+                "last_error": "",
+            }
+            upserted_account = account_store.upsert_account(account_data)
             labels.append(auth.get("nickname") or auth.get("uid"))
-        self._append_log(f"已采集 WorkBuddy {len(auths)} 个账号：{', '.join(str(x) for x in labels)}")
-        return {"ok": True, "message": f"采集成功（{len(auths)} 个账号）", "count": len(auths)}
+            
+            # 获取替换建议
+            if not replacement_suggestion: # 只取第一个账号的建议
+                suggestion = self._get_replacement_suggestion(upserted_account)
+                if suggestion:
+                    replacement_suggestion = suggestion
 
+        self._append_log(f"已采集 WorkBuddy {len(auths)} 个账号：{', '.join(str(x) for x in labels)}")
+        
+        result = {"ok": True, "message": f"采集成功（{len(auths)} 个账号）", "count": len(auths)}
+        if replacement_suggestion:
+            result["replacement_suggestion"] = replacement_suggestion
+        return result
     def _store_traework_auths(self, auths: list[dict[str, Any]]) -> dict[str, Any]:
         """把 TraeWork 登录态写入账号库（按 userId 累加，不会覆盖已采账号）。"""
         tags = traework.user_tags()
@@ -264,6 +341,7 @@ class CheckinApi:
         stored = 0
         need_token = False
         enabled_count = 0
+        replacement_suggestion = None # 初始化建议
         for auth in auths:
             blocked = traework._blocked_region(auth) if auth.get("token") else ""
             if blocked:
@@ -279,29 +357,40 @@ class CheckinApi:
             uid = str(auth.get("user_id") or "")
             if uid and tags.get(uid):
                 auth["user_tag"] = tags[uid]
+                account_data["token_blob"]["user_tag"] = tags[uid]
             if auth.get("needs_manual_token") and not auth.get("token"):
                 continue  # 无 token 的占位项不入库，避免账号列表出现空账号
-            account_store.upsert_account(
-                {
-                    "provider": "traework",
-                    "label": auth.get("user_id") or auth.get("nickname") or "traework",
-                    "identity": auth.get("user_id") or auth.get("auth_key") or "traework",
-                    "run_mode": "local",
-                    "enabled": bool(auth.get("token")) and not blocked,
-                    "token_blob": auth,
-                    "last_error": note,
-                }
-            )
+            
+            account_data = {
+                "provider": "traework",
+                "label": auth.get("user_id") or auth.get("nickname") or "traework",
+                "identity": auth.get("user_id") or auth.get("auth_key") or "traework",
+                "run_mode": "local",
+                "enabled": bool(auth.get("token")) and not blocked,
+                "token_blob": auth,
+                "last_error": note,
+            }
+            upserted_account = account_store.upsert_account(account_data)
             stored += 1
             identities.append(str(auth.get("user_id") or auth.get("auth_key") or "traework"))
             saved.append(f"{uid or '未知'}({auth.get('user_region') or '?'})" + (f" {note}" if note else ""))
-        return {
+
+            # 获取替换建议
+            if not replacement_suggestion: # 只取第一个账号的建议
+                suggestion = self._get_replacement_suggestion(upserted_account)
+                if suggestion:
+                    replacement_suggestion = suggestion
+
+        result = {
             "stored": stored,
             "enabled_count": enabled_count,
             "need_token": need_token,
             "saved": saved,
             "identities": identities,
         }
+        if replacement_suggestion:
+            result["replacement_suggestion"] = replacement_suggestion
+        return result
 
     def _on_traework_captured(self, auths: list[dict[str, Any]], reason: str) -> None:
         """实时捕获回调：Trae 登录/切号后立即落库。"""
@@ -554,8 +643,33 @@ class CheckinApi:
         return {"ok": True, "message": f"已设为 {mode}"}
 
     def delete_account(self, account_id: str = "") -> dict[str, Any]:
-        if not account_store.delete_account(str(account_id)):
+        # 首先加载所有账号，找到要删除的账号以便获取其 run_mode 和 server_account_id
+        all_accounts = account_store.load_accounts()
+        account_to_delete = next((a for a in all_accounts if str(a.get("id")) == str(account_id)), None)
+
+        if not account_to_delete:
             return {"ok": False, "message": "未找到账号"}
+
+        # 删除本地账号
+        if not account_store.delete_account(str(account_id)):
+            return {"ok": False, "message": "删除本地账号失败"}
+
+        # 如果是服务器代跑账号，则尝试从服务器删除
+        if account_to_delete.get("run_mode") == "server":
+            server_id = account_to_delete.get("id") # 这里的id就是server_account_id
+            if server_id:
+                try:
+                    server_del_result = server_client.delete_server_account(server_id)
+                    if not server_del_result.get("ok"):
+                        self._append_log(f"删除服务器代跑账号 {account_id} 失败: {server_del_result.get('message')}")
+                        # 即使服务器删除失败，本地也已删除，可以根据需求决定是否回滚或仅记录日志
+                        return {"ok": False, "message": f"本地账号已删除，但删除服务器账号失败: {server_del_result.get('message')}"}
+                    else:
+                        self._append_log(f"服务器代跑账号 {account_id} 已删除。")
+                except Exception as exc:
+                    self._append_log(f"调用服务器删除接口异常: {exc}")
+                    return {"ok": False, "message": f"本地账号已删除，但调用服务器删除接口异常: {exc}"}
+
         return {"ok": True, "message": "已删除"}
 
     def run_local_now(self) -> dict[str, Any]:
@@ -660,6 +774,90 @@ class CheckinApi:
 
         self._bg(worker)
         return {"ok": True, "message": "正在执行 WorkBuddy 成长任务"}
+
+    def replace_server_account(self, old_account_id: str, new_account_id: str) -> dict[str, Any]:
+        self._append_log(f"尝试更换服务器代跑账号：旧账号ID={old_account_id}, 新账号ID={new_account_id}")
+        
+        # 1. 查找并验证旧账号
+        all_accounts = account_store.load_accounts()
+        old_account = next((a for a in all_accounts if str(a.get("id")) == str(old_account_id)), None)
+        if not old_account:
+            return {"ok": False, "message": f"未找到旧账号 {old_account_id}"}
+        if old_account.get("run_mode") != "server":
+            return {"ok": False, "message": f"旧账号 {old_account_id} 不是服务器代跑模式，无法更换"}
+
+        # 2. 查找并验证新账号
+        new_account = next((a for a in all_accounts if str(a.get("id")) == str(new_account_id)), None)
+        if not new_account:
+            return {"ok": False, "message": f"未找到新账号 {new_account_id}"}
+        if new_account.get("run_mode") == "server":
+            return {"ok": False, "message": f"新账号 {new_account_id} 已是服务器代跑模式，请选择本地账号进行更换"}
+        
+        # 3. 删除服务器上的旧账号
+        try:
+            self._append_log(f"正在删除服务器上的旧账号: {old_account_id}")
+            server_del_result = server_client.delete_server_account(old_account_id)
+            if not server_del_result.get("ok"):
+                self._append_log(f"删除服务器旧账号 {old_account_id} 失败: {server_del_result.get('message')}")
+                return {"ok": False, "message": f"删除服务器旧账号失败: {server_del_result.get('message')}"}
+        except Exception as exc:
+            self._append_log(f"调用服务器删除旧账号接口异常: {exc}")
+            return {"ok": False, "message": f"调用服务器删除旧账号接口异常: {exc}"}
+
+        # 4. 上传新的账号到服务器并更新本地状态
+        try:
+            self._append_log(f"正在上传新账号 {new_account_id} 到服务器")
+            # 将新账号设置为服务器模式
+            new_account["run_mode"] = "server"
+            # 更新本地 account_store，因为它现在是服务器模式了
+            account_store.upsert_account(new_account)
+            
+            # 同步到服务器
+            server_sync_result = server_client.sync_server_blob(new_account, log=self._append_log, force=True)
+            if not server_sync_result or not server_sync_result.get("ok"):
+                # 如果同步失败，尝试回滚本地账号为本地模式 (可选，取决于业务逻辑)
+                new_account["run_mode"] = "local"
+                account_store.upsert_account(new_account)
+                self._append_log(f"新账号 {new_account_id} 上传服务器失败: {server_sync_result.get('message') if server_sync_result else '未知错误'}")
+                return {"ok": False, "message": f"新账号上传服务器失败: {server_sync_result.get('message') if server_sync_result else '未知错误'}"}
+            
+            self._append_log(f"账号 {old_account_id} 已成功更换为 {new_account_id} 并上传至服务器。")
+            return {"ok": True, "message": f"账号 {old_account_id} 已成功更换为 {new_account_id}"}
+
+        except Exception as exc:
+            self._append_log(f"上传新账号到服务器异常: {exc}")
+            # 同样，如果上传失败，尝试回滚本地账号为本地模式
+            new_account["run_mode"] = "local"
+            account_store.upsert_account(new_account)
+            return {"ok": False, "message": f"上传新账号到服务器异常: {exc}"}
+
+    def _get_replacement_suggestion(self, new_local_account: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        根据新入库的本地账号，查找是否存在同服务商的、且处于服务器代跑模式的旧账号，
+        并返回替换建议。
+        """
+        if new_local_account.get("run_mode") == "server":
+            return None # 新账号已经是服务器模式，不需要替换建议
+
+        all_accounts = account_store.load_accounts()
+        new_provider = new_local_account.get("provider")
+        new_identity = account_store.account_identity_key(new_local_account) # 使用 identity key 进行匹配
+
+        # 查找是否存在与新账号同服务商且同 identity key 的服务器代跑账号
+        # 这里的逻辑是：如果有一个旧的服务器账号与新账号“身份”相同，就提示替换
+        for acc in all_accounts:
+            if acc.get("run_mode") == "server" and \
+               acc.get("provider") == new_provider and \
+               account_store.account_identity_key(acc) == new_identity and \
+               str(acc.get("id")) != str(new_local_account.get("id")): # 确保不是同一个账号ID
+                return {
+                    "old_account_id": str(acc.get("id")),
+                    "old_account_label": str(acc.get("label") or acc.get("id")),
+                    "new_account_id": str(new_local_account.get("id")),
+                    "new_account_label": str(new_local_account.get("label") or new_local_account.get("id")),
+                    "provider": new_provider
+                }
+        return None
 
     def run_server_now(self) -> dict[str, Any]:
         def worker() -> None:

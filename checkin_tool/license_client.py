@@ -15,6 +15,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .run_jane_api import get_license_status, lookup_card_code_with_usage
 from .secure_storage import load_json as secure_load_json, save_json as secure_save_json
 
 DEFAULT_APP_KEY = "points-checkin"
@@ -273,18 +274,22 @@ def _post_plain(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any
             return payload if isinstance(payload, dict) else {"code": -1, "message": "响应无效"}
     except HTTPError as exc:
         body_text = ""
+        server_message = ""
         try:
             body_text = exc.read().decode("utf-8", errors="ignore")
             value = json.loads(body_text)
-            if isinstance(value, dict):
-                return value
+            if isinstance(value, dict) and (value.get("message") or value.get("msg")):
+                server_message = value.get("message") or value.get("msg")
         except Exception:
             pass
-        return {"code": exc.code, "message": body_text[:200] or f"HTTP {exc.code}"}
+        
+        # Prioritize server's message, otherwise provide a user-friendly HTTP error
+        user_message = server_message or f"服务器响应错误（HTTP {exc.code}），请稍后再试。"
+        return {"code": exc.code, "message": user_message}
     except URLError as exc:
-        return {"code": -1, "message": f"网络失败: {exc}"}
+        return {"code": -1, "message": f"无法连接到授权服务器，请检查网络连接: {exc.reason}"}
     except Exception as exc:
-        return {"code": -1, "message": str(exc)}
+        return {"code": -1, "message": f"授权服务通信异常，请联系技术支持。详情: {str(exc)}"}
 
 
 def _post_json(url: str, body: dict[str, Any], timeout: float, scope: str, prefer_crypto: bool) -> dict[str, Any]:
@@ -298,7 +303,7 @@ def _post_json(url: str, body: dict[str, Any], timeout: float, scope: str, prefe
         if prefer_crypto:
             if plain.get("code") in (200, 0, "200", "0") or isinstance(plain.get("data"), dict):
                 return plain
-            return {"code": -1, "message": f"加密通道失败且明文失败: {exc}"}
+            return {"code": -1, "message": f"与授权服务器安全通信失败，请检查网络环境或联系技术支持。详情: {exc}"}
         return plain
 
 
@@ -378,6 +383,38 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
         cfg["prefer_crypto"],
     )
     ok, msg, data = _unwrap(resp)
+
+    # Fetch gateway license status for account limits
+    gateway_license_data: dict[str, Any] = {}
+    try:
+        gateway_resp = get_license_status(fp)
+        # Assuming gateway_resp already contains the relevant fields like tokenQuota and tokenUsed
+        if isinstance(gateway_resp, dict):
+            gateway_license_data = gateway_resp
+    except Exception as exc:
+        print(f"Failed to fetch gateway license status: {exc}") # Log the error, but don't block
+        # Continue with app-license data if gateway license fetch fails
+
+    # Merge gateway license data into current data, prioritizing gateway for account limits
+    if gateway_license_data:
+        data["accountLimit"] = gateway_license_data.get("tokenQuota")
+        data["accountUsed"] = gateway_license_data.get("tokenUsed")
+
+    # Fetch card code usage limit if a card code is configured
+    configured_card_code = settings.get("card_code")
+    if configured_card_code:
+        try:
+            card_code_lookup_resp = lookup_card_code_with_usage(configured_card_code)
+            if card_code_lookup_resp and card_code_lookup_resp.get("usageLimit") is not None:
+                data["accountLimit"] = card_code_lookup_resp["usageLimit"]
+                # You might also want to add cardCode status or expiry to data if needed
+                # For now, we only care about usageLimit
+        except Exception as exc:
+            print(f"Failed to fetch card code usage limit: {exc}") # Log the error
+
+    # Optionally, update message or validity based on gateway license if needed
+    # For now, keep app-license's validity and message as primary for overall license status
+
     if not ok:
         # 票据失效（过期 / 设备变更 / 重装）：用已保存的卡密静默重新激活
         renewed = _auto_renew(cfg, cache, fp, public_cfg)

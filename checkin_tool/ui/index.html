@@ -663,6 +663,32 @@
       border-color: #c4ecd9
     }
 
+    .toast {
+      background-color: rgba(0, 0, 0, 0.7);
+      color: #fff;
+      padding: 10px 15px;
+      border-radius: 5px;
+      margin-bottom: 10px;
+      opacity: 0;
+      transition: opacity 0.3s ease-in-out;
+      font-size: 13px;
+      max-width: 300px;
+      word-wrap: break-word;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .toast.ok {
+      background-color: var(--ok);
+    }
+
+    .toast.err {
+      background-color: var(--danger);
+    }
+
     .empty {
       color: var(--muted);
       text-align: center;
@@ -901,6 +927,23 @@
     </div>
   </div>
 
+  <!-- 更换账号 -->
+  <div class="modal" id="modal-replace">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>更换服务器代跑账号</h2>
+      </div>
+      <p class="lead" id="replace-hint">请选择一个本地账号，替换当前的服务器代跑账号。</p>
+      <div class="list" id="replace-account-list">
+        <div class="empty">暂无可用本地账号</div>
+      </div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-replace-cancel">取消</button>
+        <button class="primary" id="btn-replace-confirm" disabled>确认更换</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 主体 -->
   <div class="app" id="shell">
     <header class="topbar">
@@ -1031,6 +1074,11 @@
             <span class="bar"></span>
             <h2>积分记录</h2>
             <div class="spacer"></div>
+            <!-- 新增账号筛选器 -->
+            <select id="credit-account-filter" style="margin-right: 10px;">
+              <option value="">所有账号</option>
+              <!-- 账号选项将由JS动态填充 -->
+            </select>
             <button class="sm danger" id="btn-clear-credits">清理</button>
           </div>
           <table class="table">
@@ -1096,6 +1144,18 @@
             <button class="sm" id="btn-clear-runs">清理跑批日志</button>
           </div>
         </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>数据管理</h2>
+          </div>
+          <div class="setting-item">
+            <span>数据备份与恢复</span>
+            <div class="input-group">
+              <button class="primary" id="btn-backup-data">备份数据</button>
+              <button class="primary" id="btn-restore-data">恢复数据</button>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
 
@@ -1123,6 +1183,9 @@
     </div>
   </div>
 
+  <!-- Toast 消息容器 -->
+  <div id="toast-container" style="position: fixed; top: 20px; right: 20px; z-index: 9999;"></div>
+
   <script>
     const api = () => window.pywebview && window.pywebview.api;
     const $ = (id) => document.getElementById(id);
@@ -1142,6 +1205,24 @@
       const a = api();
       if (!a || !a[name]) throw new Error('界面桥接未就绪，请稍候重试');
       return await a[name](...args);
+    }
+
+    // Toast 消息函数
+    function showToast(message, type = 'info', duration = 3000) {
+      const toastContainer = $('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      toast.textContent = message;
+      toastContainer.appendChild(toast);
+
+      setTimeout(() => {
+        toast.classList.add('show');
+      }, 10); // 小延迟确保动画效果
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+        toast.addEventListener('transitionend', () => toast.remove());
+      }, duration);
     }
 
     function setGate(show, msg) {
@@ -1193,6 +1274,7 @@
         <button class="sm" data-act="local">本机</button>
         <button class="sm" data-act="server">代跑</button>
         <button class="sm" data-act="upload">上传</button>
+        ${r.run_mode === 'server' ? `<button class="sm" data-act="replace" data-old-id="${esc(r.id)}">更换</button>` : ''}
         <button class="sm danger" data-act="del">删除</button>
       </div>
     </div>`).join('');
@@ -1229,6 +1311,52 @@
     <td>${esc(r.streak ?? '')}</td>
     <td>${esc(r.message)}</td>
   </tr>`).join('');
+    }
+
+    // 用于渲染更换账号模态框中的本地账号列表
+    function renderReplaceAccountList(accounts, currentOldAccountId) {
+      const box = $('replace-account-list');
+      const confirmBtn = $('btn-replace-confirm');
+      // 过滤出非服务器代跑的账号，并且不是当前正在被替换的旧账号
+      const localAccounts = accounts.filter(a => a.run_mode !== 'server' && a.id !== currentOldAccountId);
+
+      if (!localAccounts.length) {
+        box.innerHTML = '<div class="empty">暂无可用本地账号</div>';
+        confirmBtn.disabled = true;
+        return;
+      }
+
+      box.innerHTML = localAccounts.map(r => `
+    <div class="item" data-id="${esc(r.id)}" data-provider="${esc(r.provider)}" data-label="${esc(r.label)}">
+      <div class="main">
+        <div class="title">
+          <span>${esc(r.provider)}</span>
+          <span class="tag">${esc(r.label || r.id)}</span>
+        </div>
+        <div class="meta">本机 · 积分 ${esc(r.last_credits ?? '-')}</div>
+      </div>
+    </div>`).join('');
+
+      // 添加点击事件监听器，用于选择账号
+      let selectedNewAccountId = null;
+      box.querySelectorAll('.item').forEach(item => {
+        item.addEventListener('click', () => {
+          box.querySelectorAll('.item').forEach(i => i.classList.remove('active')); // 移除所有选中状态
+          item.classList.add('active'); // 添加选中状态
+          selectedNewAccountId = item.dataset.id;
+          confirmBtn.disabled = false; // 启用确认按钮
+        });
+      });
+
+      confirmBtn.onclick = async () => {
+        if (selectedNewAccountId) {
+          await act(() => call('replace_server_account', currentOldAccountId, selectedNewAccountId));
+          $('modal-replace').classList.remove('show');
+          // 重置选择状态和按钮
+          selectedNewAccountId = null;
+          confirmBtn.disabled = true;
+        }
+      };
     }
 
     let revokedNotified = '';
@@ -1296,20 +1424,58 @@
       renderStats(data.board || {});
       renderAccounts(data.accounts || []);
       renderCreds(data.credentials || []);
-      renderCredits(data.credits || []);
+
+      // 填充积分筛选器
+      const creditFilter = $('credit-account-filter');
+      creditFilter.innerHTML = '<option value="">所有账号</option>'; // 总是包含所有账号选项
+      (data.accounts || []).forEach(acc => {
+        const option = document.createElement('option');
+        option.value = acc.id;
+        option.textContent = `${acc.provider} - ${acc.label || acc.id}`;
+        creditFilter.appendChild(option);
+      });
+      // 保持当前选中状态
+      const currentSelectedAccountId = creditFilter.value;
+      if (currentSelectedAccountId) {
+        creditFilter.value = currentSelectedAccountId;
+      }
+
+      // 刷新积分历史视图
+      await refreshCreditsView();
+
       (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l)));
+    }
+
+    // 新增函数，用于刷新积分历史视图
+    async function refreshCreditsView() {
+      const creditFilter = $('credit-account-filter');
+      const accountId = creditFilter.value || null;
+      const creditsResult = await call('credit_history', accountId);
+      renderCredits(creditsResult.items || []);
     }
 
     async function act(fn, okMsg) {
       try {
         const r = await fn();
         logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
-        if (!r.ok && r.message) alert(r.message);
+        if (!r.ok && r.message) showToast(r.message, 'err');
+
+        // 处理替换建议
+        if (r.ok && r.replacement_suggestion) {
+          const suggestion = r.replacement_suggestion;
+          const confirmReplace = confirm(
+            `检测到您刚采集了新的 ${suggestion.provider} 账号 ${suggestion.new_account_label}.\n` +
+            `是否要用它替换当前的服务器代跑账号 ${suggestion.old_account_label}？`
+          );
+          if (confirmReplace) {
+            await act(() => call('replace_server_account', suggestion.old_account_id, suggestion.new_account_id));
+          }
+        }
         await refreshAll();
         return r;
       } catch (e) {
         logLine(String(e), 'err');
-        alert(String(e));
+        showToast(String(e), 'err');
       }
     }
 
@@ -1364,10 +1530,22 @@
       if (!btn) return;
       const id = btn.closest('.item').dataset.id;
       const actName = btn.dataset.act;
+      let oldAccountIdToReplace = ''; // 用于暂存被替换的旧账号ID
+
       if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
       if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
       if (actName === 'upload') await act(() => call('upload_delegate', id));
       if (actName === 'del' && confirm('删除该账号？')) await act(() => call('delete_account', id));
+      if (actName === 'replace') {
+        oldAccountIdToReplace = btn.dataset.oldId;
+        $('modal-replace').classList.add('show');
+        // 渲染可用于替换的本地账号列表
+        // 注意：这里需要传入 state.accounts，因为 renderReplaceAccountList 需要过滤
+        renderReplaceAccountList(state.accounts, oldAccountIdToReplace);
+        // 保存当前旧账号的ID，供确认更换时使用
+        $('btn-replace-confirm').dataset.oldAccountId = oldAccountIdToReplace;
+        $('btn-replace-confirm').disabled = true; // 默认禁用确认按钮，直到选择新账号
+      }
     };
     $('cred-list').onclick = async (e) => {
       const btn = e.target.closest('button[data-cact]');
@@ -1375,6 +1553,13 @@
       const id = btn.closest('.item').dataset.cid;
       if (btn.dataset.cact === 'login') await act(() => call('unified_login', id));
       if (btn.dataset.cact === 'del' && confirm('删除该账密？')) await act(() => call('delete_credential', id));
+    };
+    $('btn-replace-cancel').onclick = () => {
+      $('modal-replace').classList.remove('show');
+      // 重置选择状态和按钮
+      $('btn-replace-confirm').disabled = true;
+      $('replace-account-list').innerHTML = '<div class="empty">暂无可用本地账号</div>'; // 清空列表
+      $('btn-replace-confirm').dataset.oldAccountId = ''; // 清除暂存的旧账号ID
     };
     $('btn-save-redeem').onclick = async () => {
       await call('save_settings', {
@@ -1405,6 +1590,28 @@
     $('btn-clear-credits').onclick = async () => { if (confirm('清理积分记录？')) await act(() => call('clear_credits')); };
     $('btn-clear-live').onclick = async () => { if (confirm('清理实时日志？')) { await call('clear_live_logs'); $('log').innerHTML = ''; } };
     $('btn-clear-runs').onclick = async () => { if (confirm('清理跑批日志？')) await act(() => call('clear_run_logs')); };
+
+    $('btn-backup-data').onclick = async () => {
+      const r = await act(() => call('backup_data'), '数据备份成功');
+      if (r.ok && r.path) {
+        showToast(`数据已备份到：${r.path}`, 'ok');
+      }
+    };
+
+    $('btn-restore-data').onclick = async () => {
+      const backupFilePath = prompt('请输入备份文件的完整路径（例如：C:\\Users\\YourUser\\AppData\\Roaming\\points-checkin\\backup\\checkintool_backup_20231027103000.zip）');
+      if (backupFilePath) {
+        if (confirm('恢复数据将覆盖现有数据，并需要重启应用才能生效。是否继续？')) {
+          const r = await act(() => call('restore_data', backupFilePath), '数据恢复成功');
+          if (r.ok) {
+            showToast('数据恢复成功，请手动重启应用以使更改生效。', 'ok');
+            // 可以考虑在此处触发应用重启，但通常需要后端支持或直接提示用户
+          } else {
+            showToast(`数据恢复失败：${r.message}`, 'err');
+          }
+        }
+      }
+    };
     $('btn-log-clear').onclick = async () => { await call('clear_live_logs'); $('log').innerHTML = ''; };
 
     async function poll() {
@@ -1466,6 +1673,7 @@
     async function boot() {
       try {
         await refreshAll();
+        $('credit-account-filter').onchange = refreshCreditsView; // 添加筛选器事件监听
         poll();
         pollTrae();
         pollNotices();

@@ -60,6 +60,12 @@ class LicenseGuard:
             "last": dict(self._last),
         }
 
+    def get_account_limit(self) -> int | None:
+        """获取当前生效的账户数量限制。"""
+        if self._last and self._last.get("license"):
+            return self._last["license"].get("accountLimit")
+        return None
+
     # ------------------------------------------------------------ 判定
     def check_now(self) -> dict[str, Any]:
         """立即校验一次。返回 {valid, revoked, message, explicit}。"""
@@ -76,7 +82,7 @@ class LicenseGuard:
 
         if res.get("valid"):
             self._net_fail = 0
-            self._last = {"at": _now(), "valid": True, "message": res.get("message") or "授权有效"}
+            self._last = {"at": _now(), "valid": True, "message": res.get("message") or "授权有效", "license": res.get("license")}
             return {"valid": True, "revoked": False, "message": self._last["message"], "explicit": False}
 
         # 无效：服务端明确拒绝 vs 网络异常

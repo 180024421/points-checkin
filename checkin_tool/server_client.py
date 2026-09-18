@@ -50,14 +50,22 @@ def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
             data = json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
         text = exc.read().decode("utf-8", errors="ignore")
+        server_message = ""
         try:
             data = json.loads(text)
+            # Prioritize server's message from the JSON response
+            if isinstance(data, dict) and (data.get("message") or data.get("msg")):
+                server_message = data.get("message") or data.get("msg")
         except Exception:
-            return {"ok": False, "message": text[:200] or f"HTTP {exc.code}"}
+            pass # Failed to parse JSON error, fall back to generic message
+
+        # If server_message is available, use it. Otherwise, provide a user-friendly HTTP error.
+        user_message = server_message or f"服务器响应错误（HTTP {exc.code}），请稍后再试。"
+        return {"ok": False, "message": user_message}
     except URLError as exc:
-        return {"ok": False, "message": f"网络失败: {exc}"}
+        return {"ok": False, "message": f"无法连接到服务器，请检查网络连接: {exc.reason}"}
     except Exception as exc:
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": f"服务器通信异常，请联系技术支持。详情: {str(exc)}"}
 
     if not isinstance(data, dict):
         return {"ok": False, "message": "响应无效"}

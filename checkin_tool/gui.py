@@ -34,7 +34,7 @@ class CheckinApp(tk.Tk):
         self.lbl_time: ttk.Label | None = None
 
         self._build_ui()
-        self.refresh_license()
+        self.after(0, self.refresh_license)
         self.refresh_accounts()
         self.refresh_today()
         self.refresh_credits_view()
@@ -51,7 +51,8 @@ class CheckinApp(tk.Tk):
         top.pack(fill="x")
         ttk.Label(top, text="积分签到工具", font=("Segoe UI", 14, "bold")).pack(side="left")
         ttk.Label(top, text=f"v{__version__}", foreground="gray").pack(side="left", padx=(8, 0))
-        ttk.Button(top, text="刷新", width=8, command=self._refresh_all).pack(side="right")
+        self.btn_refresh_all = ttk.Button(top, text="刷新", width=8, command=self._refresh_all)
+        self.btn_refresh_all.pack(side="right")
 
         nb = ttk.Notebook(self, padding=(10, 0, 10, 6))
         nb.pack(fill="both", expand=True)
@@ -100,6 +101,8 @@ class CheckinApp(tk.Tk):
         self.lbl_today.pack(anchor="w")
         self.lbl_license = ttk.Label(status, text="授权：未检查", foreground="#333", wraplength=640)
         self.lbl_license.pack(anchor="w", pady=(6, 0))
+        self.lbl_account_quota = ttk.Label(status, text="账号额度：未检查", foreground="#333", wraplength=640)
+        self.lbl_account_quota.pack(anchor="w", pady=(6, 0))
 
         actions = ttk.LabelFrame(self.tab_home, text="常用操作", padding=8)
         actions.pack(fill="x", pady=(0, 8))
@@ -258,8 +261,10 @@ class CheckinApp(tk.Tk):
 
         btns = ttk.Frame(self.tab_license)
         btns.pack(fill="x")
-        ttk.Button(btns, text="保存/激活", width=14, command=self.on_redeem).pack(side="left", padx=2)
-        ttk.Button(btns, text="刷新授权", width=14, command=self.refresh_license).pack(side="left", padx=2)
+        self.btn_redeem = ttk.Button(btns, text="保存/激活", width=14, command=self.on_redeem)
+        self.btn_redeem.pack(side="left", padx=2)
+        self.btn_refresh_license = ttk.Button(btns, text="刷新授权", width=14, command=self.refresh_license)
+        self.btn_refresh_license.pack(side="left", padx=2)
         ttk.Button(btns, text="清理跑批日志", width=14, command=self.clear_run_logs).pack(side="left", padx=2)
 
     def _refresh_all(self) -> None:
@@ -289,12 +294,32 @@ class CheckinApp(tk.Tk):
 
         self.after(0, _append)
 
+    def _run_task_in_background(self, task_func: Callable[[], Any], buttons_to_disable: list[ttk.Button], status_message: str = "") -> None:
+        def worker() -> None:
+            for btn in buttons_to_disable:
+                self.after(0, lambda b=btn: b.config(state="disabled"))
+            if self.lbl_license_bar and status_message:
+                self.after(0, lambda s=status_message: self.lbl_license_bar.config(text=s, foreground="gray"))
+
+            try:
+                task_func()
+            finally:
+                for btn in buttons_to_disable:
+                    self.after(0, lambda b=btn: b.config(state="enabled"))
+                if self.lbl_license_bar and status_message:
+                    self.after(0, lambda: self.lbl_license_bar.config(text="", foreground="gray")) # Clear status
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _tick_refresh(self) -> None:
         try:
             self.refresh_today()
             self.refresh_accounts()
-        except Exception:
-            pass
+        try:
+            self.refresh_today()
+            self.refresh_accounts()
+        except Exception as e:
+            self.append_log(f"后台刷新异常: {e}")
         self.after(15000, self._tick_refresh)
 
     def _selected_account_id(self) -> str | None:
@@ -306,21 +331,47 @@ class CheckinApp(tk.Tk):
             return None
         return str(values[-1])  # id 在末列
 
-    def refresh_license(self) -> None:
+    def refresh_license(self, *, _from_thread: bool = False) -> None:
+        if not _from_thread:
+            self._run_task_in_background(lambda: self.refresh_license(_from_thread=True), [self.btn_refresh_all], "正在刷新授权状态...")
+            return
+
         self.settings["license_base_url"] = self.var_base.get().strip()
         save_settings(self.settings)
         result = check_status(self.settings, force_online=True)
         text = f"valid={result.get('valid')}  {result.get('message')}"
-        self.lbl_license.configure(text="授权：" + text)
+        self.after(0, lambda:
+            self.lbl_license.configure(text="授权：" + text)
+        )
         if self.lbl_license_bar is not None:
             valid = bool(result.get("valid"))
-            self.lbl_license_bar.configure(
-                text=("● 已授权" if valid else "○ 未授权"),
-                foreground=("#2e8b57" if valid else "gray"),
+            self.after(0, lambda:
+                self.lbl_license_bar.configure(
+                    text=("● 已授权" if valid else "○ 未授权"),
+                    foreground=("#2e8b57" if valid else "gray"),
+                )
             )
         self.append_log("授权: " + text)
 
-    def on_redeem(self) -> None:
+        # Update account quota display
+        usage = account_store.get_account_usage()
+        quota_text = f"额度：{usage["used"]}/{usage["limit"]} (剩余 {usage["remain"]}) - {usage["planLabel"]}"
+        if usage["limit"] is None:
+            quota_text = f"额度：{usage["used"]}/不限 - {usage["planLabel"]}"
+        if not usage["planLabel"]:
+            quota_text = f"额度：{usage["used"]}/{usage["limit"]} (剩余 {usage["remain"]})"
+            if usage["limit"] is None:
+                quota_text = f"额度：{usage["used"]}/不限"
+
+        self.after(0, lambda:
+            self.lbl_account_quota.configure(text="账号额度：" + quota_text)
+        )
+
+    def on_redeem(self, *, _from_thread: bool = False) -> None:
+        if not _from_thread:
+            self._run_task_in_background(lambda: self.on_redeem(_from_thread=True), [self.btn_redeem, self.btn_refresh_license], "正在保存并激活授权...")
+            return
+
         self.settings["license_base_url"] = self.var_base.get().strip()
         self.settings["card_code"] = self.var_card.get().strip()
         self.settings["autostart"] = bool(self.var_autostart.get())
@@ -331,14 +382,15 @@ class CheckinApp(tk.Tk):
             autostart.set_enabled(bool(self.var_autostart.get()))
         except Exception as exc:
             self.append_log(f"开机自启设置失败: {exc}")
+            self.after(0, lambda: messagebox.showerror("设置失败", f"开机自启设置失败: {exc}"))
         if self.var_card.get().strip():
             result = redeem(self.settings, self.var_card.get())
-            messagebox.showinfo("激活", result.get("message") or str(result))
+            self.after(0, lambda: messagebox.showinfo("激活", result.get("message") or str(result)))
         if self.settings.get("auto_schedule"):
             self.scheduler.start()
         else:
             self.scheduler.stop()
-        self.refresh_license()
+        self.after(0, self.refresh_license)
 
     def refresh_accounts(self) -> None:
         for item in self.tree.get_children():
@@ -667,6 +719,9 @@ class CheckinApp(tk.Tk):
             uid = str(auth.get("user_id") or "")
             if uid and tags.get(uid):
                 auth["user_tag"] = tags[uid]
+                token_blob = account_data.get("token_blob", {})
+                token_blob["user_tag"] = tags[uid]
+                account_data["token_blob"] = token_blob
             account_store.upsert_account(
                 {
                     "provider": "traework",
@@ -806,8 +861,8 @@ class CheckinApp(tk.Tk):
         if self._tray:
             try:
                 self._tray.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error stopping tray icon: {e}")
         self.destroy()
 
     def on_close(self) -> None:
