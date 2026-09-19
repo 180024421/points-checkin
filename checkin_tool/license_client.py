@@ -15,7 +15,9 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .run_jane_api import get_license_status, lookup_card_code_with_usage
+# 惰性导入：run_jane_api → settings → license_client，若在模块顶层 import 会形成
+# 循环导入（settings 取 DEFAULT_APP_KEY 时本模块才执行到第 18 行，常量尚未定义）。
+# 两个函数都只在函数体内用到，因此改为调用时再 import（见 status()）。
 from .secure_storage import load_json as secure_load_json, save_json as secure_save_json
 
 DEFAULT_APP_KEY = "points-checkin"
@@ -384,36 +386,9 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
     )
     ok, msg, data = _unwrap(resp)
 
-    # Fetch gateway license status for account limits
-    gateway_license_data: dict[str, Any] = {}
-    try:
-        gateway_resp = get_license_status(fp)
-        # Assuming gateway_resp already contains the relevant fields like tokenQuota and tokenUsed
-        if isinstance(gateway_resp, dict):
-            gateway_license_data = gateway_resp
-    except Exception as exc:
-        print(f"Failed to fetch gateway license status: {exc}") # Log the error, but don't block
-        # Continue with app-license data if gateway license fetch fails
-
-    # Merge gateway license data into current data, prioritizing gateway for account limits
-    if gateway_license_data:
-        data["accountLimit"] = gateway_license_data.get("tokenQuota")
-        data["accountUsed"] = gateway_license_data.get("tokenUsed")
-
-    # Fetch card code usage limit if a card code is configured
-    configured_card_code = settings.get("card_code")
-    if configured_card_code:
-        try:
-            card_code_lookup_resp = lookup_card_code_with_usage(configured_card_code)
-            if card_code_lookup_resp and card_code_lookup_resp.get("usageLimit") is not None:
-                data["accountLimit"] = card_code_lookup_resp["usageLimit"]
-                # You might also want to add cardCode status or expiry to data if needed
-                # For now, we only care about usageLimit
-        except Exception as exc:
-            print(f"Failed to fetch card code usage limit: {exc}") # Log the error
-
-    # Optionally, update message or validity based on gateway license if needed
-    # For now, keep app-license's validity and message as primary for overall license status
+    # 额度字段一律以 app-license 下发为准。
+    # 历史实现曾把大帅网关的 tokenQuota/tokenUsed（Token 用量）和卡密 usageLimit（使用次数）
+    # 覆盖到 accountLimit 上，二者都不是「账号数」，会让额度显示成荒谬数字，已移除。
 
     if not ok:
         # 票据失效（过期 / 设备变更 / 重装）：用已保存的卡密静默重新激活

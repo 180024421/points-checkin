@@ -315,9 +315,6 @@ class CheckinApp(tk.Tk):
         try:
             self.refresh_today()
             self.refresh_accounts()
-        try:
-            self.refresh_today()
-            self.refresh_accounts()
         except Exception as e:
             self.append_log(f"后台刷新异常: {e}")
         self.after(15000, self._tick_refresh)
@@ -353,15 +350,18 @@ class CheckinApp(tk.Tk):
             )
         self.append_log("授权: " + text)
 
-        # Update account quota display
+        # Update account quota display（额度用满时给出升级引导）
         usage = account_store.get_account_usage()
-        quota_text = f"额度：{usage["used"]}/{usage["limit"]} (剩余 {usage["remain"]}) - {usage["planLabel"]}"
-        if usage["limit"] is None:
-            quota_text = f"额度：{usage["used"]}/不限 - {usage["planLabel"]}"
-        if not usage["planLabel"]:
-            quota_text = f"额度：{usage["used"]}/{usage["limit"]} (剩余 {usage["remain"]})"
-            if usage["limit"] is None:
-                quota_text = f"额度：{usage["used"]}/不限"
+        used = usage.get("used") or 0
+        limit = usage.get("limit")
+        plan = usage.get("planLabel") or ""
+        if limit is None:
+            quota_text = f"{used}/不限"
+        else:
+            detail = "已满，升级套餐可挂载更多" if used >= limit else f"剩余 {usage.get('remain')}"
+            quota_text = f"{used}/{limit}（{detail}）"
+        if plan:
+            quota_text += f" - {plan}"
 
         self.after(0, lambda:
             self.lbl_account_quota.configure(text="账号额度：" + quota_text)

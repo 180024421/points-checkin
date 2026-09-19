@@ -1374,7 +1374,10 @@
       const plan = (usage && usage.planLabel) || (lic && lic.accountPlanLabel) || '';
       const limitText = limit === null ? '不限账号' : `${limit} 个账号`;
       if (limit !== null) {
-        $('chip-account-limit').textContent = `套餐：${plan ? plan + ' · ' : ''}${limitText}（已用 ${used}/${limit}）`;
+        // 额度用满或已超限时给出升级引导
+        const full = used >= limit;
+        $('chip-account-limit').textContent =
+          `套餐：${plan ? plan + ' · ' : ''}${limitText}（已用 ${used}/${limit}${full ? ' · 已满，升级套餐可挂载更多' : ''}）`;
       } else {
         $('chip-account-limit').textContent = `套餐：${plan || '未配置'} · ${limitText}`;
       }
