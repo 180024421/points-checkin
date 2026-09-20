@@ -70,11 +70,31 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_iso(s: str | None) -> datetime | None:
-    if not s:
+_MILLIS_THRESHOLD = 1e11  # > 1e11 视为毫秒；秒级 epoch 现在约 1.7e9，不会误判
+
+
+def _epoch_to_dt(num: float) -> datetime:
+    return datetime.fromtimestamp(num / 1000.0 if num > _MILLIS_THRESHOLD else num, timezone.utc)
+
+
+def _parse_iso(s: Any) -> datetime | None:
+    """解析到期时间，三种线格式都要吃：
+
+    1. ISO 字符串（``2026-10-14T23:25:44``）—— src 那代 DTO 直出。
+    2. 空格分隔（``2026-10-14 23:25:44``）—— 服务端实发形态。
+    3. epoch 数字（``1764000000000``）—— 线上那代返回 Map 的 DTO 把 ``expireAt``
+       以 ``java.util.Date`` 直出，Jackson 序列化成毫秒数字。旧实现只认字符串，
+       于是到期时间一律解析成 None：时长轴在客户端等于不存在，
+       ``ticket_still_valid`` 也少一条判据（只能靠 ticketExpireAt 兜）。
+    """
+    if s is None or s == "":
         return None
+    if isinstance(s, (int, float)) and not isinstance(s, bool):
+        return _epoch_to_dt(float(s))
     try:
         text = str(s).strip().replace("Z", "+00:00")
+        if text.lstrip("-").isdigit():
+            return _epoch_to_dt(float(text))
         if " " in text and "T" not in text[:20]:
             text = text.replace(" ", "T", 1)
         dt = datetime.fromisoformat(text)
