@@ -855,10 +855,10 @@ class CheckinApp(tk.Tk):
 
     # ------------------------------------------------------- 代挂额度 / 联系邮箱
     def _bind_contact_flow(self) -> bool:
-        """弹窗引导「绑定邮箱 → 输入验证码」，返回是否绑定成功。"""
+        """弹窗引导「绑定邮箱 → 输入验证码」，返回是否绑定成功。**可跳过**。"""
         email = simpledialog.askstring(
             "联系邮箱",
-            "服务器代跑需要绑定联系邮箱（账号异常时服务端会通知这个邮箱）：",
+            "绑定联系邮箱后，账号异常时除站内提醒外还能收到邮件通知（不绑定也能代跑）：",
             parent=self,
         )
         if not email:
@@ -877,25 +877,34 @@ class CheckinApp(tk.Tk):
         messagebox.showinfo("完成", "联系邮箱已绑定")
         return True
 
-    def _contact_gate(self) -> bool:
-        """代跑前置校验（见 ``account_store.contact_gate``）；未绑定时弹窗引导，返回 False = 不继续。"""
-        if account_store.contact_gate() is None:
-            return True
-        if not self._bind_contact_flow():
-            return False
-        return account_store.contact_gate(force=False) is None
+    def _bind_hint(self) -> None:
+        """未绑定联系邮箱时引导一次（见 ``account_store.contact_notice``）。
+
+        软引导：只记一句提示并询问是否现在绑定，**无论用户选什么都不中断代跑** ——
+        服务端早已把「先绑邮箱」的硬校验删掉（run-jane c1f0d49），本机不该再造门槛。
+        """
+        try:
+            notice = account_store.contact_notice(force=False)
+        except Exception as exc:  # noqa: BLE001 - 引导本身出错不能影响主流程
+            self.append_log(f"读取邮箱绑定状态失败：{exc}")
+            return
+        if not notice:
+            return
+        self.append_log(notice)
+        if messagebox.askyesno("联系邮箱", notice + "\n\n现在要绑定吗？"):
+            self._bind_contact_flow()
 
     def set_mode(self, mode: str) -> None:
         account_id = self._selected_account_id()
         if not account_id:
             messagebox.showinfo("提示", "请先选中账号")
             return
-        if mode == "server" and not self._contact_gate():
-            return
         result = account_store.set_run_mode(account_id, mode)
         self.append_log(str(result.get("message") or ""))
         if not result.get("ok"):
             messagebox.showerror("模式", result.get("message") or "失败")
+        if mode == "server":
+            self._bind_hint()
         self.refresh_accounts()
 
     def delete_selected(self) -> None:
@@ -943,9 +952,7 @@ class CheckinApp(tk.Tk):
         if not ok:
             messagebox.showerror("卡密", msg)
             return
-        if not self._contact_gate():
-            self.append_log("未绑定联系邮箱，已取消代跑上传")
-            return
+        self._bind_hint()
         account_id = self._selected_account_id()
         accounts = account_store.load_accounts()
         targets = [a for a in accounts if (not account_id or str(a.get("id")) == account_id)]

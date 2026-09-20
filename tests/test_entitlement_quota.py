@@ -174,16 +174,25 @@ def test_entitlement_info_normalizes_response(monkeypatch):
     assert out["data"]["contactEmail"] == ""
 
 
-def test_contact_gate_blocks_only_on_explicit_unbound(monkeypatch):
+def test_contact_notice_guides_without_ever_blocking(monkeypatch):
+    """邮箱只决定「除站内提醒外还发不发邮件」，不是代跑前置条件。
+
+    旧版这里断言的是「未绑定 → 返回阻断原因」，配合 webview/gui 的 early return
+    等于把整条代跑链路堵死（现网 4 条授权 0 条绑过邮箱）。服务端同一句 400
+    已在 run-jane c1f0d49 删除，客户端口径必须跟上。
+    """
     _reset()
     monkeypatch.setattr(account_store, "refresh_entitlement", lambda **kw: {})
     try:
-        # 未知（离线 / 服务端没返回该字段）不能阻断用户
-        assert account_store.contact_gate(force=False) is None
+        # 未知（离线 / 服务端没返回该字段）不打扰用户
+        assert account_store.contact_notice(force=False) is None
         monkeypatch.setattr(account_store, "_ent_cache", (time.monotonic(), {"contactVerified": True}))
-        assert account_store.contact_gate(force=False) is None
+        assert account_store.contact_notice(force=False) is None, "已绑定不必提示"
         monkeypatch.setattr(account_store, "_ent_cache", (time.monotonic(), {"contactVerified": False}))
-        assert "邮箱" in (account_store.contact_gate(force=False) or "")
+        notice = account_store.contact_notice(force=False) or ""
+        assert "邮箱" in notice
+        # 文案本身不能写成前置条件，否则用户会以为不绑定就用不了
+        assert "需要" not in notice and "请先" not in notice, notice
     finally:
         _reset()
 

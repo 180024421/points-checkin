@@ -122,15 +122,20 @@ def contact_binding() -> dict[str, Any]:
     return {"verified": ent.get("contactVerified"), "email": ent.get("contactEmail") or ""}
 
 
-def contact_gate(*, force: bool = True) -> str | None:
-    """代跑前置校验：服务端要求先绑定并验证联系邮箱。
+def contact_notice(*, force: bool = True) -> str | None:
+    """「建议绑定联系邮箱」的一句话引导；None = 不必提示（已绑定 / 状态未知）。
 
-    返回 None 表示放行，返回字符串表示阻断原因。服务端不可达时 verified 为 None，
-    同样放行 —— 额度与绑定最终由服务端裁决，本机不该因为网络抖动把用户挡在门外。
+    **这不是门槛**，任何调用方都不许因为它中断操作。邮箱只决定服务端在站内消息之外
+    要不要再发一封邮件（``CheckinNotifier.notifyIssue`` 站内必发）；旧实现把
+    ``verified is False`` 拦在挂载/上传之前，等于用一条提醒渠道堵死整条代跑链路 ——
+    现网 4 条授权里 0 条绑过邮箱，服务端也因此删掉了同一句 400（run-jane c1f0d49）。
+
+    服务端不可达时 ``verified`` 为 None，同样不提示：额度与绑定最终由服务端裁决，
+    本机不该因为网络抖动反复骚扰用户。
     """
     refresh_entitlement(force=force)
     if contact_binding().get("verified") is False:
-        return "服务器代跑前请先绑定联系邮箱（账号签到异常时通知你）"
+        return "建议绑定联系邮箱：账号签到异常时除站内提醒外还能收到邮件通知（设置页可绑，不绑定也能代跑）"
     return None
 
 

@@ -498,12 +498,21 @@ class CheckinApi:
         }
 
     # ------------------------------------------------------------ 代挂额度 / 联系邮箱
-    def _contact_gate(self) -> dict[str, Any] | None:
-        """代跑前置校验，见 ``account_store.contact_gate``；返回 None = 放行。"""
-        message = account_store.contact_gate()
-        if message:
-            return {"ok": False, "needBind": True, "message": message}
-        return None
+    def _bind_hint(self) -> str:
+        """未绑定联系邮箱时的一句引导。
+
+        **软引导**：只记日志、只把文案带回给界面，绝不中断刚完成的操作
+        （见 ``account_store.contact_notice``）。用 ``force=False`` 走权益缓存的 TTL，
+        一次引导不该多打一趟 HTTP。
+        """
+        try:
+            notice = account_store.contact_notice(force=False) or ""
+        except Exception as exc:  # noqa: BLE001 - 引导本身出错不能影响主流程
+            self._append_log(f"读取邮箱绑定状态失败：{exc}")
+            return ""
+        if notice:
+            self._append_log(notice)
+        return notice
 
     def bind_contact(self, email: str = "") -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=False)
@@ -871,13 +880,13 @@ class CheckinApi:
         return {"ok": True, "message": "已删除"}
 
     def set_account_mode(self, account_id: str = "", mode: str = "local") -> dict[str, Any]:
-        if str(mode or "").strip() == "server":
-            blocked = self._contact_gate()
-            if blocked:
-                return blocked
         result = account_store.set_run_mode(account_id, mode)
         if result.get("ok"):
             self._append_log(str(result.get("message") or ""))
+        if str(mode or "").strip() == "server":
+            notice = self._bind_hint()
+            if notice:
+                result["notice"] = notice
         return result
 
     def delete_account(self, account_id: str = "") -> dict[str, Any]:
@@ -928,9 +937,7 @@ class CheckinApi:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
             return {"ok": False, "message": msg}
-        blocked = self._contact_gate()
-        if blocked:
-            return blocked
+        notice = self._bind_hint()
         accounts = account_store.load_accounts()
         targets = [a for a in accounts if (not account_id or str(a.get("id")) == str(account_id))]
 
@@ -952,7 +959,10 @@ class CheckinApi:
         busy = self._start_job("代跑上传", worker)
         if busy:
             return busy
-        return {"ok": True, "message": "正在上传代跑"}
+        out: dict[str, Any] = {"ok": True, "message": "正在上传代跑"}
+        if notice:
+            out["notice"] = notice
+        return out
 
     def sync_server_credentials(self) -> dict[str, Any]:
         """手动触发一次「代跑凭证保鲜」：本机续期后回传服务器。"""
@@ -1013,9 +1023,7 @@ class CheckinApi:
         return {"ok": True, "message": "正在执行 WorkBuddy 成长任务"}
 
     def replace_server_account(self, old_account_id: str, new_account_id: str) -> dict[str, Any]:
-        blocked = self._contact_gate()
-        if blocked:
-            return blocked
+        self._bind_hint()
         self._append_log(f"尝试更换服务器代跑账号：旧账号ID={old_account_id}, 新账号ID={new_account_id}")
         
         # 1. 查找并验证旧账号

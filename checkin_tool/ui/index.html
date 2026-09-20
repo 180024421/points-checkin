@@ -927,19 +927,19 @@
     </div>
   </div>
 
-  <!-- 绑定联系邮箱：服务器代跑的前置条件 -->
+  <!-- 绑定联系邮箱：可选的提醒渠道，不是代跑前置条件 -->
   <div class="modal" id="modal-bind">
     <div class="panel-box">
       <div class="card-head"><span class="bar"></span>
         <h2>绑定联系邮箱</h2>
       </div>
-      <p class="lead">服务器代跑需要联系邮箱：账号签到异常时服务端会往这个邮箱发通知。填写后会收到一封带验证码的邮件。</p>
+      <p class="lead">可选。绑定后账号签到异常时，除了软件内提醒还能收到一封邮件通知；<b>不绑定也能正常代跑</b>。填写后会收到一封带验证码的邮件。</p>
       <div class="field"><span>邮箱</span><input id="bind-email" type="email" placeholder="you@example.com"
           autocomplete="off"></div>
       <div class="field" id="bind-code-row" style="display:none"><span>验证码</span><input id="bind-code"
           autocomplete="off" placeholder="邮件里的验证码"></div>
       <div class="row end gap-md">
-        <button class="ghost" id="btn-bind-cancel">取消</button>
+        <button class="ghost" id="btn-bind-cancel">稍后再说</button>
         <button class="primary" id="btn-bind-send">发送验证码</button>
         <button class="primary" id="btn-bind-verify" style="display:none">完成绑定</button>
       </div>
@@ -1591,11 +1591,9 @@
         const r = await fn();
         logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
         if (!r.ok && r.message) showToast(r.message, 'err');
-        // 后端要求先绑定联系邮箱：弹绑定框，别只报一句错误
-        if (!r.ok && r.needBind) {
-          openContactBind();
-          return r;
-        }
+        // 联系邮箱未绑定只是引导，不是门槛：操作已经成功，只补一条不打断流程的提示
+        // （常驻入口在顶部额度标签上，见 applyLicense 的 contactVerified 分支）
+        if (r.ok && r.notice) showToast(r.notice, 'info', 6000);
 
         // 处理替换建议
         if (r.ok && r.replacement_suggestion) {
