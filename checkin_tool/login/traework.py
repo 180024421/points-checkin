@@ -5,22 +5,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
-import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
 
 from ..adapters import traework as traework_adapter
 from .browser import attach_token_sniffer, ensure_playwright, fill_login_form
+from .http import post_json as _http_post_json, walk_dicts
 from .types import LoginResult
-
-_SSL = ssl.create_default_context()
 
 # 从 Trae 桌面端 main.js 提取的默认 ClientID
 CLIENT_ID_TRAE = "ono9krqynydwx5"
@@ -49,34 +44,8 @@ def _pkce() -> tuple[str, str]:
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout: float = 20.0) -> tuple[int, dict[str, Any] | str]:
-    data = json.dumps(payload).encode("utf-8")
-    req = Request(
-        url,
-        method="POST",
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "CheckinTool/1.0",
-        },
-    )
-    try:
-        with urlopen(req, timeout=timeout, context=_SSL) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            try:
-                return resp.status, json.loads(raw)
-            except Exception:
-                return resp.status, raw
-    except HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
-        try:
-            return exc.code, json.loads(raw)
-        except Exception:
-            return exc.code, raw
-    except URLError as exc:
-        return -1, f"network:{exc}"
-    except Exception as exc:  # noqa: BLE001
-        return -1, str(exc)
+    # Trae 的 OAuth 接口响应偏慢，比登录层默认超时留得更宽
+    return _http_post_json(url, payload, timeout)
 
 
 def get_login_host() -> tuple[str | None, str]:
@@ -109,16 +78,17 @@ def try_api_password_login(username: str, password: str) -> LoginResult:
         if isinstance(body, dict):
             # unlikely success path
             token = None
-            stack = [body]
-            while stack:
-                cur = stack.pop()
-                if not isinstance(cur, dict):
-                    continue
-                for k, v in cur.items():
-                    if isinstance(v, dict):
-                        stack.append(v)
-                    elif isinstance(v, str) and k.lower() in ("token", "accesstoken", "access_token") and len(v) > 20:
-                        token = v
+            for node in walk_dicts(body):
+                for k, v in node.items():
+                    if (
+                        isinstance(v, str)
+                        and k.lower() in ("token", "accesstoken", "access_token")
+                        and len(v) > 20
+                    ):
+                        token = token or v  # 取第一个命中的，避免遍历顺序决定结果
+                        break
+                if token:
+                    break
             if token:
                 headers = traework_adapter.load_device_headers()
                 blob = {
@@ -183,6 +153,13 @@ class _AuthCodeServer:
                 self._httpd.shutdown()
             except Exception:
                 pass
+            try:
+                # 只 shutdown() 不 close 的话，监听 socket 会一直占着端口，
+                # 同一进程内反复登录会累积泄漏端口。
+                self._httpd.server_close()
+            except Exception:
+                pass
+            self._httpd = None
 
 
 def _exchange_token(api_base: str, auth_code: str, code_verifier: str, device: dict[str, str]) -> dict[str, Any] | None:
@@ -204,22 +181,17 @@ def _exchange_token(api_base: str, auth_code: str, code_verifier: str, device: d
             continue
         # walk for token fields
         token = refresh = user_id = None
-        stack = [body]
-        while stack:
-            cur = stack.pop()
-            if not isinstance(cur, dict):
-                continue
-            for k, v in cur.items():
+        for node in walk_dicts(body):
+            for k, v in node.items():
                 lk = str(k).lower()
-                if isinstance(v, dict):
-                    stack.append(v)
-                elif isinstance(v, str):
-                    if lk in ("token", "accesstoken", "access_token", "cloudidetoken") and len(v) > 20:
-                        token = token or v
-                    if lk in ("refreshtoken", "refresh_token"):
-                        refresh = refresh or v
-                    if lk in ("userid", "user_id", "uid") and v:
-                        user_id = user_id or v
+                if not isinstance(v, str):
+                    continue
+                if lk in ("token", "accesstoken", "access_token", "cloudidetoken") and len(v) > 20:
+                    token = token or v
+                if lk in ("refreshtoken", "refresh_token"):
+                    refresh = refresh or v
+                if lk in ("userid", "user_id", "uid") and v:
+                    user_id = user_id or v
         if token:
             return {
                 "token": token,
@@ -328,7 +300,8 @@ def try_playwright_login(
             ok=False,
             provider="traework",
             method="playwright",
-            message=f"拿到 AuthCode 但 ExchangeToken 失败。可改用粘贴 token。code={auth_code[:8]}…",
+            # AuthCode 是一次性凭证，不写进会落盘的消息里
+            message="拿到 AuthCode 但 ExchangeToken 失败，可改用粘贴 token。",
             needs_manual=True,
         )
 

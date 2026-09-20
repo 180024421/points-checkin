@@ -3,16 +3,11 @@
 
 from __future__ import annotations
 
-import json
-import ssl
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from .browser import attach_token_sniffer, ensure_playwright, fill_login_form
+from .http import post_json as _post_json, walk_dicts
 from .types import LoginResult
-
-_SSL = ssl.create_default_context()
 
 # 经验路径：腾讯 OneID 邮箱登录；多数场景仍需浏览器态，失败即回退 Playwright
 API_CANDIDATES = [
@@ -29,62 +24,24 @@ LOGIN_PAGES = [
 ]
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout: float = 12.0) -> tuple[int, dict[str, Any] | str]:
-    data = json.dumps(payload).encode("utf-8")
-    req = Request(
-        url,
-        method="POST",
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "CheckinTool/1.0",
-        },
-    )
-    try:
-        with urlopen(req, timeout=timeout, context=_SSL) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-            try:
-                return resp.status, json.loads(raw)
-            except Exception:
-                return resp.status, raw
-    except HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
-        try:
-            return exc.code, json.loads(raw)
-        except Exception:
-            return exc.code, raw
-    except URLError as exc:
-        return -1, f"network:{exc}"
-    except Exception as exc:  # noqa: BLE001
-        return -1, str(exc)
-
-
 def _token_from_api_body(body: Any) -> dict[str, Any] | None:
     if not isinstance(body, dict):
         return None
-    stack = [body]
     token = uid = nickname = None
     expires = None
-    while stack:
-        cur = stack.pop()
-        if not isinstance(cur, dict):
-            continue
-        for k, v in cur.items():
+    for node in walk_dicts(body):
+        for k, v in node.items():
             lk = str(k).lower()
-            if isinstance(v, dict):
-                stack.append(v)
-            elif isinstance(v, list):
-                stack.extend([x for x in v if isinstance(x, dict)])
-            elif isinstance(v, str):
-                if lk in ("accesstoken", "access_token", "token") and len(v) > 20:
-                    token = token or v
-                if lk in ("uid", "userid", "user_id") and v:
-                    uid = uid or v
-                if lk in ("nickname", "name") and v:
-                    nickname = nickname or v
-            elif isinstance(v, (int, float)) and lk in ("expiresat", "expires_at"):
-                expires = v
+            if not isinstance(v, str):
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and lk in ("expiresat", "expires_at"):
+                    expires = v
+                continue
+            if lk in ("accesstoken", "access_token", "token") and len(v) > 20:
+                token = token or v
+            if lk in ("uid", "userid", "user_id") and v:
+                uid = uid or v
+            if lk in ("nickname", "name") and v:
+                nickname = nickname or v
     if not token:
         return None
     return {

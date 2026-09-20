@@ -73,7 +73,7 @@ def test_idempotent_when_all_claimed():
 def test_missing_task_is_skipped():
     """活动换期后任务码消失：必须跳过，不能当成未完成去白跑 AI 对话。"""
     r = FakeRunner([_task("chat_5", "claimed", 5, 5)], chat_tasks=True)
-    res = r.run()
+    r.run()
     assert r.calls["chat"] == 0
 
 
@@ -88,9 +88,16 @@ def test_network_failure_is_isolated():
         def _req(self, *args, **kwargs):
             raise RuntimeError("boom")
 
-    res = Boom([]).run()
-    assert res["ok"], "单任务失败不应让整体崩掉"
+    res = Boom([]).run()  # 异常不能抛出 run()
     assert res["failed"], "失败项要记录下来"
+    assert not res["ok"], "什么都没跑成不能算成功：否则 last_error 被清空、当天不再补跑"
+    assert "任务列表拉取失败" in res["message"]
+
+
+def test_empty_task_list_is_not_a_failure():
+    """接口正常但本期真没任务：算成功，别把这种日子反复重跑。"""
+    res = FakeRunner([]).run()
+    assert res["ok"] is True and res["total"] == 0
 
 
 def test_requires_token():

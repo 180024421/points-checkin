@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Callable
 
+from .http import walk_dicts
+
 
 def ensure_playwright():
     try:
@@ -87,19 +89,9 @@ def extract_tokens_from_text(text: str) -> dict[str, Any]:
     except Exception:
         data = None
     if isinstance(data, dict):
-        stack = [data]
-        while stack:
-            cur = stack.pop()
-            if not isinstance(cur, dict):
-                continue
-            for k, v in cur.items():
+        for node in walk_dicts(data):
+            for k, v in node.items():
                 lk = str(k).lower()
-                if isinstance(v, (dict, list)):
-                    if isinstance(v, dict):
-                        stack.append(v)
-                    else:
-                        stack.extend([x for x in v if isinstance(x, dict)])
-                    continue
                 if not isinstance(v, (str, int, float)):
                     continue
                 if lk in ("accesstoken", "access_token", "token", "cloudtoken", "id_token") and len(str(v)) > 20:
@@ -122,20 +114,43 @@ def extract_tokens_from_text(text: str) -> dict[str, Any]:
     return out
 
 
+# 一次登录会命中几十个响应，逐个把 body 塞进 bucket 会无上限增长
+_MAX_SNIFFED = 60
+_SNIFF_MAX_BODY_CHARS = 500_000
+
+
 def attach_token_sniffer(page, bucket: list[dict[str, Any]]) -> Callable[[], None]:
     def _on_response(resp) -> None:
         try:
-            ctype = (resp.headers or {}).get("content-type", "")
-            if "json" not in ctype and "text" not in ctype and "javascript" not in ctype:
-                # still try small bodies
-                pass
+            try:
+                ctype = str((resp.headers or {}).get("content-type", "")).lower()
+            except Exception:
+                return
+            # 只嗅探文本类响应：图片/字体/二进制既不含 token，
+            # resp.text() 还会把它们整份解码出来白吃内存。
+            if not any(marker in ctype for marker in ("json", "javascript", "text", "xml")):
+                return
             body = resp.text()
-            found = extract_tokens_from_text(body)
-            if found:
-                found["_url"] = resp.url
-                bucket.append(found)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 响应体可能已随跳转丢弃
             return
+        if not body or len(body) > _SNIFF_MAX_BODY_CHARS:
+            return
+        try:
+            found = extract_tokens_from_text(body)
+        except Exception:  # noqa: BLE001
+            return
+        if found:
+            found["_url"] = str(resp.url)[:200]
+            bucket.append(found)
+            if len(bucket) > _MAX_SNIFFED:
+                del bucket[: len(bucket) - _MAX_SNIFFED]
 
     page.on("response", _on_response)
-    return lambda: None
+
+    def detach() -> None:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:  # noqa: BLE001 - 页面已关或旧版本无该 API
+            pass
+
+    return detach

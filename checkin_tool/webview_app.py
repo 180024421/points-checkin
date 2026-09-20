@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import threading
 from datetime import datetime
@@ -11,20 +10,36 @@ from pathlib import Path
 from typing import Any, Callable
 import zipfile
 
-from . import __version__, account_store, autostart, credential_store, server_client
+from . import (
+    __version__,
+    account_store,
+    autostart,
+    credential_store,
+    license_client,
+    server_client,
+    vault,
+)
 from .adapters import traework, workbuddy
-from .license_client import check_status, clear_cache, ensure_licensed, redeem
+from .license_client import (
+    check_status,
+    clear_cache,
+    ensure_licensed,
+    public_license_view,
+    redeem,
+)
 from .license_guard import LicenseGuard
 from .login import login_by_id
+from .redact import mask_text
 from .scheduler import (
+    AutoSyncer,
     DailyScheduler,
-    refresh_account_credits,
+    credit_slot_busy,
     refresh_server_credentials,
     run_local_all,
     run_workbuddy_tasks,
     run_workbuddy_tasks_all,
 )
-from .settings import load_settings, save_settings
+from .settings import load_settings, save_settings, settings_path
 from .traework_watcher import TraeWorkAutoCapture
 
 
@@ -36,11 +51,88 @@ def _resource_path(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+def _num(value: Any, default: float) -> float:
+    """设置项可能来自前端 / 手工改过的配置文件，不能因脏值让程序起不来。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if number != number or number in (float("inf"), float("-inf")):
+        return float(default)
+    return number
+
+
+def _v_text(value: Any) -> tuple[bool, Any]:
+    return True, str(value or "").strip()
+
+
+def _v_bool(value: Any) -> tuple[bool, Any]:
+    return True, bool(value)
+
+
+def _v_http_url(value: Any) -> tuple[bool, Any]:
+    """授权服务地址由前端任意填写，而卡密 / ticket 会发往该地址，必须限死协议。"""
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return True, ""
+    if not text.lower().startswith(("http://", "https://")):
+        return False, "授权服务地址必须以 http:// 或 https:// 开头"
+    if len(text) > 200:
+        return False, "授权服务地址过长"
+    return True, text
+
+
+def _v_choice(*allowed: str):
+    def check(value: Any) -> tuple[bool, Any]:
+        text = str(value or "").strip()
+        if text not in allowed:
+            return False, f"取值只能是 {'/'.join(allowed)}"
+        return True, text
+
+    return check
+
+
+def _v_int_range(low: int, high: int):
+    def check(value: Any) -> tuple[bool, Any]:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return False, f"只能是 {low}~{high} 的整数"
+        if not low <= number <= high:
+            return False, f"只能是 {low}~{high}"
+        return True, number
+
+    return check
+
+
+# 前端可改的设置项：白名单 + 逐值校验（此前只白名单 key、不校验 value）
+_SETTING_VALIDATORS: dict[str, Callable[[Any], tuple[bool, Any]]] = {
+    "license_base_url": _v_http_url,
+    "card_code": _v_text,
+    "autostart": _v_bool,
+    "auto_schedule": _v_bool,
+    "evening_schedule": _v_bool,
+    "traework_auto_capture": _v_bool,
+    "auto_sync": _v_bool,
+    "auto_sync_minutes": _v_int_range(1, 240),
+    "traework_user_dir": _v_text,
+    "traework_ug_api_base": _v_http_url,
+    "workbuddy_task_mode": _v_choice("off", "local", "server"),
+    "workbuddy_chat_tasks": _v_bool,
+    "allow_insecure_transport": _v_bool,
+    "allow_plain_fallback": _v_bool,
+}
+
+
 class CheckinApi:
     def __init__(self) -> None:
         self.settings = load_settings()
         self._logs: list[str] = []
         self._lock = threading.Lock()
+        # settings 会被 UI 线程（JS api）、授权守卫线程、调度线程同时读写
+        self._settings_lock = threading.RLock()
+        self._busy: set[str] = set()
+        self._busy_lock = threading.Lock()
         self.scheduler = DailyScheduler(log=self._append_log)
         if self.settings.get("auto_schedule", True):
             self.scheduler.start()
@@ -49,17 +141,17 @@ class CheckinApi:
         self.traework_watch = TraeWorkAutoCapture(
             self._on_traework_captured,
             log=self._append_log,
-            interval=float(self.settings.get("traework_watch_interval") or 3),
-            get_user_dir=lambda: self.settings.get("traework_user_dir") or "",
+            interval=_num(self.settings.get("traework_watch_interval"), 3.0),
+            get_user_dir=lambda: self._setting("traework_user_dir", ""),
         )
         if self.settings.get("traework_auto_capture", True):
             self.traework_watch.start()
             self._append_log("已启用 Trae CN 登录态自动捕获（登录后无需手动采集）")
         # 授权守卫：定时在线校验，卡密失效立即踢出登录
         self._revoked: dict[str, Any] | None = None
-        check_interval = float(self.settings.get("license_check_interval") or 300)
+        check_interval = max(30.0, _num(self.settings.get("license_check_interval"), 300.0))
         self.license_guard = LicenseGuard(
-            get_settings=lambda: self.settings,
+            get_settings=self._settings_snapshot,
             on_revoked=self._on_license_revoked,
             log=self._append_log,
             interval_sec=check_interval,
@@ -68,6 +160,58 @@ class CheckinApi:
         self._append_log(
             f"已启用授权守卫（每 {int(check_interval / 60) or 5} 分钟在线校验，卡密失效自动退出登录）"
         )
+        if str(self._setting("license_base_url", "")).lower().startswith("http://"):
+            self._append_log(
+                "[!] 授权/代跑服务当前走明文 HTTP，tokenBlob 与卡密在链路上可被同网段窥探；"
+                "服务端配好证书后请设置 allow_insecure_transport=false 强制 https"
+            )
+        # 状态/积分自动同步：启动几秒后先拉一次，之后按间隔定时拉，界面不用手点
+        self.auto_sync = AutoSyncer(
+            get_settings=self._settings_snapshot,
+            is_busy=self._job_running,
+            log=self._append_log,
+        )
+        if self.settings.get("auto_sync", True):
+            self.auto_sync.start()
+        for warning in vault.startup_warnings(license_client.data_root()):
+            self._append_log(f"[!] {warning}")
+
+    # ------------------------------------------------------------ 设置读写
+    def _setting(self, key: str, default: Any = None) -> Any:
+        with self._settings_lock:
+            return self.settings.get(key, default)
+
+    def _settings_snapshot(self) -> dict[str, Any]:
+        with self._settings_lock:
+            return dict(self.settings)
+
+    def _set_settings(self, updates: dict[str, Any]) -> None:
+        with self._settings_lock:
+            self.settings.update(updates)
+
+    # ------------------------------------------------------------ 授权门禁
+    def _sync_revoked_state(self, license_info: dict[str, Any] | None) -> None:
+        """卡密重新有效后清掉 revoked 标记，否则前端会一直停在激活门禁上。"""
+        if not self._revoked:
+            return
+        if isinstance(license_info, dict) and license_info.get("valid"):
+            self._restore_after_redeem("检测到授权已恢复")
+
+    def _restore_after_redeem(self, reason: str) -> None:
+        was_revoked = self._revoked is not None
+        self._revoked = None
+        self.license_guard.reset()
+        # 刚激活就该马上同步：启动时未授权会把本轮间隔的时间戳烧掉，不重置要等满间隔
+        self.auto_sync.sync_soon()
+        if not was_revoked:
+            return
+        if self._setting("auto_schedule", True):
+            self.scheduler.start()
+        if self._setting("traework_auto_capture", True):
+            self.traework_watch.start()
+        if self._setting("auto_sync", True):
+            self.auto_sync.start()
+        self._append_log(f"授权已恢复（{reason}），后台校验与调度已重启")
 
     def _on_license_revoked(self, reason: str) -> None:
         """卡密失效：踢出登录 —— 停后台任务 + 清本机票据 + 前端弹回激活门禁。"""
@@ -75,6 +219,7 @@ class CheckinApi:
         for name, stop in (
             ("自动签到调度", self.scheduler.stop),
             ("Trae 登录态捕获", self.traework_watch.stop),
+            ("状态积分同步", self.auto_sync.stop),
         ):
             try:
                 stop()
@@ -90,6 +235,10 @@ class CheckinApi:
 
     def stop_background(self) -> None:
         try:
+            self.auto_sync.stop()
+        except Exception as e:
+            self._append_log(f"Error stopping service: {e}")
+        try:
             self.license_guard.stop()
         except Exception as e:
             self._append_log(f"Error stopping service: {e}")
@@ -101,19 +250,41 @@ class CheckinApi:
             self.scheduler.stop()
         except Exception as e:
             self._append_log(f"Error stopping service: {e}")
+        try:
+            account_store.flush_live_logs()  # 实时日志是缓冲落盘的，退出前补一次
+        except Exception as e:
+            print(f"flush live log failed: {e}")
 
     def _append_log(self, msg: str) -> None:
-        text = str(msg).rstrip()
+        # 日志会落盘并在前端渲染：适配器/服务端的错误消息里可能带 token，统一过一道脱敏
+        text = mask_text(str(msg).rstrip(), 1000)
         account_store.append_live_log(text)
         with self._lock:
             self._logs.append(text)
             self._logs = self._logs[-400:]
 
-    def version(self) -> dict[str, Any]:
-        return {"ok": True, "version": __version__}
+    @staticmethod
+    def _strip_secrets(result: dict[str, Any]) -> dict[str, Any]:
+        """bridge 返回值统一去掉 ticket / 卡密：前端只用得到 valid / 额度 / 到期时间。
+
+        顶层和嵌套的 ``license``（服务端 cache 原样）都要过一遍——票据落到渲染进程
+        就等于交给任何能打开 DevTools 或注入 JS 的人。
+        """
+        if not isinstance(result, dict):
+            return {}
+        out = {k: v for k, v in result.items() if k not in ("ticket", "primaryCard")}
+        if isinstance(out.get("license"), dict):
+            out["license"] = public_license_view(out["license"])
+        return out
 
     def get_bootstrap(self) -> dict[str, Any]:
-        license_info = check_status(self.settings, force_online=False)
+        license_info = self._strip_secrets(check_status(self.settings, force_online=False))
+        self._sync_revoked_state(license_info.get("license"))
+        # 账号合并视图（本地 + 服务器代跑）和今日跑批映射各算一次，下面三块共用：
+        # 以前一次刷新要合并三遍，界面每 30 秒就白做两次全量合并。
+        merged = account_store.load_accounts()
+        run_map = account_store.today_run_map()
+        account_rows = [account_store.public_account_view(a, run_map) for a in merged]
         return {
             "ok": True,
             "version": __version__,
@@ -124,6 +295,8 @@ class CheckinApi:
                 "auto_schedule": bool(self.settings.get("auto_schedule", True)),
                 "evening_schedule": bool(self.settings.get("evening_schedule", True)),
                 "traework_auto_capture": bool(self.settings.get("traework_auto_capture", True)),
+                "auto_sync": bool(self.settings.get("auto_sync", True)),
+                "auto_sync_minutes": int(self.settings.get("auto_sync_minutes") or 5),
                 "traework_user_dir": self.settings.get("traework_user_dir") or "",
                 "workbuddy_task_mode": self.settings.get("workbuddy_task_mode") or "off",
                 "workbuddy_chat_tasks": bool(self.settings.get("workbuddy_chat_tasks", True)),
@@ -131,10 +304,14 @@ class CheckinApi:
             "traework_watch": self.traework_watch.status(),
             "license": license_info,
             "revoked": self._revoked,  # 非空 = 卡密已失效被踢出，前端弹回门禁并提示
-            "accountUsage": account_store.get_account_usage(),
+            "accountUsage": account_store.get_account_usage(accounts=merged),
             "licenseGuard": self.license_guard.status(),
-            "board": account_store.today_board(),
-            "accounts": self.list_accounts().get("accounts") or [],
+            "sync": {
+                **self.auto_sync.status(),
+                "busy": self._job_running() or self.auto_sync.syncing(),
+            },
+            "board": account_store.today_board(accounts=merged, today=run_map),
+            "accounts": account_rows,
             "logs": list(reversed(account_store.load_live_logs(120))),
 
             "credentials": [
@@ -156,6 +333,7 @@ class CheckinApi:
                 account_store.RUN_LOG_FILE,
                 account_store.LIVE_LOG_FILE,
                 account_store.CREDIT_HISTORY_FILE,
+                settings_path(),
                 license_client.LICENSE_CACHE,
                 license_client.DEVICE_ID_FILE,
             ]
@@ -171,34 +349,61 @@ class CheckinApi:
             self._append_log(f"数据备份失败: {exc}")
             return {"ok": False, "message": f"数据备份失败: {exc}"}
 
+    # 备份里允许恢复的文件名（其余一律忽略）：避免恶意 zip 往数据目录写任意文件
+    _RESTORE_ALLOWLIST = {
+        "accounts.json",
+        "run_log.json",
+        "live_log.json",
+        "credit_history.json",
+        "settings.json",
+    }
+    _RESTORE_MAX_MEMBER_BYTES = 20 * 1024 * 1024
+
     def restore_data(self, backup_file_path: str) -> dict[str, Any]:
         """从备份文件恢复数据。"""
         try:
-            backup_path = Path(backup_file_path)
+            backup_path = Path(str(backup_file_path or "").strip())
             if not backup_path.is_file():
                 return {"ok": False, "message": "备份文件不存在。"}
-            
-            data_root_path = account_store.data_root()
 
+            data_root_path = account_store.data_root()
+            restored: list[str] = []
+            skipped: list[str] = []
             with zipfile.ZipFile(backup_path, 'r') as zipf:
-                for member in zipf.namelist():
-                    # 确保只解压到数据根目录，防止路径遍历攻击
-                    member_path = Path(data_root_path) / Path(member).name
-                    # 避免恢复license_cache.json，因为它可能包含敏感信息且在恢复后应该重新验证
-                    # 避免恢复device_id.txt，因为它与设备绑定，恢复后可能导致设备数统计问题
-                    if member_path.name in ["license_cache.json", "device_id.txt"]:
-                        self._append_log(f"跳过恢复敏感文件: {member_path.name}")
+                for member in zipf.infolist():
+                    if member.is_dir():
                         continue
-                    
-                    # 提取文件，目标路径是data_root_path
-                    # zipfile.extract() 默认会将文件提取到当前工作目录，这里需要指定path参数
-                    # 为了避免路径遍历漏洞，我们只提取文件名，并确保目标路径在data_root_path内
-                    extracted_file_path = data_root_path / Path(member).name
-                    with open(extracted_file_path, "wb") as outfile:
-                        outfile.write(zipf.read(member))
-            
-            self._append_log(f"数据已从 {backup_file_path} 恢复。请重启应用以使更改生效。")
-            return {"ok": True, "message": "数据已恢复。请重启应用以使更改生效。"}
+                    name = Path(member.filename).name  # 只取文件名，天然免疫路径穿越
+                    if name not in self._RESTORE_ALLOWLIST:
+                        # license_cache.json / device_id.txt 含票据与设备身份，不参与恢复
+                        skipped.append(name)
+                        continue
+                    if member.file_size > self._RESTORE_MAX_MEMBER_BYTES:
+                        skipped.append(f"{name}(过大)")
+                        continue
+                    with zipf.open(member) as src, open(data_root_path / name, "wb") as outfile:
+                        outfile.write(src.read())
+                    restored.append(name)
+
+            if not restored:
+                return {"ok": False, "message": "备份中没有任何可恢复的数据文件。"}
+            # 重新载入内存副本：否则下一次保存设置会把刚恢复的文件覆盖回旧配置
+            with self._settings_lock:
+                self.settings = load_settings()
+            self._append_log(
+                f"数据已从 {backup_path.name} 恢复：{', '.join(restored)}"
+                + (f"；已忽略 {', '.join(skipped)}" if skipped else "")
+                + "。请重启应用以使更改生效。"
+            )
+            return {
+                "ok": True,
+                "message": "数据已恢复。请重启应用以使更改生效。",
+                "restored": restored,
+                "skipped": skipped,
+            }
+        except Exception as exc:
+            self._append_log(f"数据恢复失败: {exc}")
+            return {"ok": False, "message": f"数据恢复失败: {exc}"}
         except Exception as exc:
             self._append_log(f"数据恢复失败: {exc}")
             return {"ok": False, "message": f"数据恢复失败: {exc}"}
@@ -214,85 +419,114 @@ class CheckinApi:
         rows = [account_store.public_account_view(a, today) for a in account_store.load_accounts()]
         return {"ok": True, "accounts": rows}
 
-    def today_board(self) -> dict[str, Any]:
-        return {"ok": True, "board": account_store.today_board()}
-
     def credit_history(self, account_id: str | None = None) -> dict[str, Any]:
         """获取积分历史，支持按账号ID筛选。"""
         return {"ok": True, "items": account_store.load_credit_history(account_id=account_id, limit=200)}
 
-    def run_logs(self, account_id: str | None = None) -> dict[str, Any]:
-        """获取运行日志，支持按账号ID筛选。"""
-        return {"ok": True, "items": account_store.load_run_logs(account_id=account_id, limit=200)}
-
-    def list_credentials(self) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "credentials": [
-                credential_store.public_credential_view(r) for r in credential_store.load_credentials()
-            ],
-        }
-
-    def refresh_license(self) -> dict[str, Any]:
-        result = check_status(self.settings, force_online=True)
-        self._append_log(f"授权: valid={result.get('valid')} {result.get('message')}")
-        return {"ok": True, "license": result, "revoked": self._revoked}
-
     def license_check_now(self) -> dict[str, Any]:
         """手动触发一次授权校验（含踢出判定），供前端「立即校验」按钮使用。"""
         out = self.license_guard.check_now()
+        if out.get("valid"):
+            self._restore_after_redeem("手动校验通过")
         return {"ok": True, **out, "revoked": self._revoked}
-
-    def license_guard_status(self) -> dict[str, Any]:
-        return {"ok": True, "guard": self.license_guard.status(), "revoked": self._revoked}
-
-    def account_usage(self) -> dict[str, Any]:
-        """套餐与账号用量：{limit, used, remain, planLabel, expireAt}。"""
-        return {"ok": True, "usage": account_store.get_account_usage()}
 
     def save_settings(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
-        for key in (
-            "license_base_url",
-            "card_code",
-            "autostart",
-            "auto_schedule",
-            "evening_schedule",
-            "traework_auto_capture",
-            "traework_user_dir",
-            "traework_ug_api_base",
-            "workbuddy_task_mode",
-            "workbuddy_chat_tasks",
-        ):
-            if key in payload:
-                self.settings[key] = payload[key]
-        save_settings(self.settings)
+        updates: dict[str, Any] = {}
+        for key, checker in _SETTING_VALIDATORS.items():
+            if key not in payload:
+                continue
+            ok, value_or_msg = checker(payload[key])
+            if not ok:
+                return {"ok": False, "message": str(value_or_msg)}
+            updates[key] = value_or_msg
+        if not updates:
+            return {"ok": True, "message": "无改动"}
+        self._set_settings(updates)
+        with self._settings_lock:
+            snapshot = dict(self.settings)
+        save_settings(snapshot)
         try:
-            autostart.set_enabled(bool(self.settings.get("autostart")))
+            autostart.set_enabled(bool(snapshot.get("autostart")))
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"开机自启失败: {exc}")
-        if self.settings.get("auto_schedule"):
+        if snapshot.get("auto_schedule"):
             self.scheduler.start()
         else:
             self.scheduler.stop()
         # Trae 自动捕获开关即时生效
-        if self.settings.get("traework_auto_capture", True):
+        if snapshot.get("traework_auto_capture", True):
             if not self.traework_watch.running:
                 self.traework_watch.start()
                 self._append_log("已启用 Trae CN 登录态自动捕获")
         else:
             self.traework_watch.stop()
+        # 自动同步开关即时生效
+        if snapshot.get("auto_sync", True):
+            was_running = self.auto_sync.status().get("running")
+            self.auto_sync.start()
+            if not was_running:
+                self._append_log("已启用状态/积分自动同步")
+            # 线程还活着时 start() 是 no-op，间隔计时器不会复位；刚改过设置就应当马上看到结果
+            self.auto_sync.sync_soon()
+        else:
+            self.auto_sync.stop()
         return {"ok": True, "message": "设置已保存"}
 
     def redeem(self, card_code: str = "") -> dict[str, Any]:
-        code = (card_code or self.settings.get("card_code") or "").strip()
+        code = str(card_code or self._setting("card_code") or "").strip()
         if not code:
             return {"ok": False, "message": "请填写卡密"}
-        self.settings["card_code"] = code
-        save_settings(self.settings)
-        result = redeem(self.settings, code)
-        self._append_log(f"激活: {result.get('message') or result}")
-        return {"ok": bool(result.get("ok") or result.get("valid")), "result": result, "message": result.get("message")}
+        self._set_settings({"card_code": code})
+        snapshot = self._settings_snapshot()
+        save_settings(snapshot)
+        result = redeem(snapshot, code)
+        license_cache = result.get("license") or {}
+        activated = bool(result.get("valid") or license_cache.get("valid"))
+        # 只记 message：把整个 result 打进日志会连 ticket 一起落盘
+        self._append_log(f"激活: {result.get('message') or ('成功' if activated else '失败')}")
+        if activated:
+            self._restore_after_redeem("卡密激活成功")
+            # 换卡即换额度：代挂额度按卡密/卡种配置，必须重新拉一次
+            account_store.invalidate_entitlement_cache()
+            account_store.refresh_entitlement(force=True)
+        return {
+            "ok": bool(result.get("ok") or activated),
+            "result": self._strip_secrets(result),
+            "message": result.get("message"),
+            "valid": activated,
+        }
+
+    # ------------------------------------------------------------ 代挂额度 / 联系邮箱
+    def _contact_gate(self) -> dict[str, Any] | None:
+        """代跑前置校验，见 ``account_store.contact_gate``；返回 None = 放行。"""
+        message = account_store.contact_gate()
+        if message:
+            return {"ok": False, "needBind": True, "message": message}
+        return None
+
+    def bind_contact(self, email: str = "") -> dict[str, Any]:
+        ok, msg = ensure_licensed(self.settings, force_online=False)
+        if not ok:
+            return {"ok": False, "message": msg}
+        result = server_client.bind_contact(str(email or ""))
+        self._append_log(f"绑定联系邮箱：{result.get('message') or ('已发送验证码' if result.get('ok') else '失败')}")
+        return {
+            "ok": bool(result.get("ok")),
+            "needCode": bool(result.get("ok")),
+            "message": result.get("message") or ("验证码已发送到邮箱，请查收" if result.get("ok") else "绑定失败"),
+        }
+
+    def verify_contact(self, code: str = "") -> dict[str, Any]:
+        ok, msg = ensure_licensed(self.settings, force_online=False)
+        if not ok:
+            return {"ok": False, "message": msg}
+        result = server_client.verify_contact(str(code or ""))
+        self._append_log(f"邮箱验证：{result.get('message') or ('成功' if result.get('ok') else '失败')}")
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or ("邮箱已验证" if result.get("ok") else "验证码不正确或已过期"),
+        }
 
     def capture_workbuddy(self) -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=True)
@@ -356,8 +590,8 @@ class CheckinApi:
                 auth["ug_api_base"] = self.settings["traework_ug_api_base"]
             uid = str(auth.get("user_id") or "")
             if uid and tags.get(uid):
+                # token_blob 就是 auth 本身，标签写在这里即可随账号一起入库
                 auth["user_tag"] = tags[uid]
-                account_data["token_blob"]["user_tag"] = tags[uid]
             if auth.get("needs_manual_token") and not auth.get("token"):
                 continue  # 无 token 的占位项不入库，避免账号列表出现空账号
             
@@ -570,7 +804,12 @@ class CheckinApi:
         self._append_log(f"已导入账密 {row.get('provider')}/{row.get('username')}")
         login_now = bool(payload.get("login_now", True))
         if login_now:
-            self._bg(lambda: login_by_id(str(row["id"]), headed=True, log=self._append_log))
+            busy = self._start_job(
+                "账密登录",
+                lambda: login_by_id(str(row["id"]), headed=True, log=self._append_log),
+            )
+            if busy:
+                return busy
             return {"ok": True, "message": "已保存，正在后台登录…", "id": row.get("id")}
         return {"ok": True, "message": "已保存", "id": row.get("id")}
 
@@ -621,7 +860,9 @@ class CheckinApi:
                 except Exception as exc:  # noqa: BLE001
                     self._append_log(f"统一登录异常：{exc}")
 
-        self._bg(worker)
+        busy = self._start_job("账密统一登录", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": f"已启动 {len(ids)} 条登录"}
 
     def delete_credential(self, credential_id: str = "") -> dict[str, Any]:
@@ -630,47 +871,20 @@ class CheckinApi:
         return {"ok": True, "message": "已删除"}
 
     def set_account_mode(self, account_id: str = "", mode: str = "local") -> dict[str, Any]:
-        accounts = account_store.load_accounts()
-        found = False
-        for row in accounts:
-            if str(row.get("id")) == str(account_id):
-                row["run_mode"] = mode
-                found = True
-                break
-        if not found:
-            return {"ok": False, "message": "未找到账号"}
-        account_store.save_accounts(accounts)
-        return {"ok": True, "message": f"已设为 {mode}"}
+        if str(mode or "").strip() == "server":
+            blocked = self._contact_gate()
+            if blocked:
+                return blocked
+        result = account_store.set_run_mode(account_id, mode)
+        if result.get("ok"):
+            self._append_log(str(result.get("message") or ""))
+        return result
 
     def delete_account(self, account_id: str = "") -> dict[str, Any]:
-        # 首先加载所有账号，找到要删除的账号以便获取其 run_mode 和 server_account_id
-        all_accounts = account_store.load_accounts()
-        account_to_delete = next((a for a in all_accounts if str(a.get("id")) == str(account_id)), None)
-
-        if not account_to_delete:
-            return {"ok": False, "message": "未找到账号"}
-
-        # 删除本地账号
-        if not account_store.delete_account(str(account_id)):
-            return {"ok": False, "message": "删除本地账号失败"}
-
-        # 如果是服务器代跑账号，则尝试从服务器删除
-        if account_to_delete.get("run_mode") == "server":
-            server_id = account_to_delete.get("id") # 这里的id就是server_account_id
-            if server_id:
-                try:
-                    server_del_result = server_client.delete_server_account(server_id)
-                    if not server_del_result.get("ok"):
-                        self._append_log(f"删除服务器代跑账号 {account_id} 失败: {server_del_result.get('message')}")
-                        # 即使服务器删除失败，本地也已删除，可以根据需求决定是否回滚或仅记录日志
-                        return {"ok": False, "message": f"本地账号已删除，但删除服务器账号失败: {server_del_result.get('message')}"}
-                    else:
-                        self._append_log(f"服务器代跑账号 {account_id} 已删除。")
-                except Exception as exc:
-                    self._append_log(f"调用服务器删除接口异常: {exc}")
-                    return {"ok": False, "message": f"本地账号已删除，但调用服务器删除接口异常: {exc}"}
-
-        return {"ok": True, "message": "已删除"}
+        result = account_store.delete_account_with_server(account_id, log=self._append_log)
+        if not result.get("ok"):
+            self._append_log(str(result.get("message") or ""))
+        return result
 
     def run_local_now(self) -> dict[str, Any]:
         self._append_log("开始本机签到…")
@@ -679,27 +893,44 @@ class CheckinApi:
             results = run_local_all(require_license=True, log=self._append_log)
             self._append_log(f"本机签到完成，共 {len(results)} 条")
 
-        self._bg(worker)
+        busy = self._start_job("本机签到", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": "已开始本机签到"}
 
-    def refresh_credits(self) -> dict[str, Any]:
-        def worker() -> None:
-            for account in account_store.load_accounts():
-                if not account.get("enabled", True):
-                    continue
-                info = refresh_account_credits(account)
-                self._append_log(
-                    f"积分查询 {account.get('provider')}/{account.get('label')}: "
-                    f"{info.get('message') or info}"
-                )
+    def sync_now(self) -> dict[str, Any]:
+        """「立即同步」：拉一次服务器代跑状态 + 查本机账号积分。"""
 
-        self._bg(worker)
-        return {"ok": True, "message": "正在刷新积分"}
+        return self._start_sync("同步")
+
+    def refresh_credits(self) -> dict[str, Any]:
+        """「刷新积分」与「立即同步」同一条路径：共用任务名和串行槽，
+        否则两个入口能对同一批账号并发问供应商。"""
+
+        return self._start_sync("积分刷新")
+
+    def _start_sync(self, label: str) -> dict[str, Any]:
+        # 手动同步和签到/批量登录都要用同一批 token，和自动同步一样让路，不并行
+        if self._job_running() or credit_slot_busy():
+            return {"ok": False, "busy": True, "message": "已有任务在执行（签到/登录/同步），请等待完成"}
+
+        def worker() -> None:
+            result = self.auto_sync.sync_once(reason="手动")
+            if not result.get("ok"):
+                self._append_log(result.get("message") or "同步失败")
+
+        busy = self._start_job("同步", worker)
+        if busy:
+            return busy
+        return {"ok": True, "message": f"正在{label}…"}
 
     def upload_delegate(self, account_id: str = "") -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
             return {"ok": False, "message": msg}
+        blocked = self._contact_gate()
+        if blocked:
+            return blocked
         accounts = account_store.load_accounts()
         targets = [a for a in accounts if (not account_id or str(a.get("id")) == str(account_id))]
 
@@ -718,7 +949,9 @@ class CheckinApi:
                 if not result:
                     self._append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")
 
-        self._bg(worker)
+        busy = self._start_job("代跑上传", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": "正在上传代跑"}
 
     def sync_server_credentials(self) -> dict[str, Any]:
@@ -738,7 +971,9 @@ class CheckinApi:
                 f"代跑凭证同步完成：检查 {len(results)} 个账号，刷新 token {refreshed} 个，回传 {synced} 个"
             )
 
-        self._bg(worker)
+        busy = self._start_job("代跑凭证同步", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": "正在同步代跑凭证"}
 
     def run_workbuddy_tasks(self, account_id: str = "") -> dict[str, Any]:
@@ -772,10 +1007,15 @@ class CheckinApi:
             done = sum(1 for r in results if r.get("ok"))
             self._append_log(f"成长任务执行完成：{done}/{len(results)} 个账号")
 
-        self._bg(worker)
+        busy = self._start_job("WorkBuddy 成长任务", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": "正在执行 WorkBuddy 成长任务"}
 
     def replace_server_account(self, old_account_id: str, new_account_id: str) -> dict[str, Any]:
+        blocked = self._contact_gate()
+        if blocked:
+            return blocked
         self._append_log(f"尝试更换服务器代跑账号：旧账号ID={old_account_id}, 新账号ID={new_account_id}")
         
         # 1. 查找并验证旧账号
@@ -793,13 +1033,24 @@ class CheckinApi:
         if new_account.get("run_mode") == "server":
             return {"ok": False, "message": f"新账号 {new_account_id} 已是服务器代跑模式，请选择本地账号进行更换"}
         
-        # 3. 删除服务器上的旧账号
+        # 3. 删除服务器上的旧账号（用服务端自增 id，本机 uuid 服务端认不出）
+        old_server_id = old_account.get("server_account_id") or (
+            str(old_account_id).removeprefix("srv:") if str(old_account_id).startswith("srv:") else ""
+        )
+        if not old_server_id:
+            # 没有服务端 id 就绝不能拿本机 uuid 去删：服务端按自增主键查，只会误报或漏删
+            return {"ok": False, "message": f"旧账号 {old_account_id} 没有服务器代跑记录 id，无法更换"}
         try:
-            self._append_log(f"正在删除服务器上的旧账号: {old_account_id}")
-            server_del_result = server_client.delete_server_account(old_account_id)
+            self._append_log(f"正在删除服务器上的旧代跑记录: {old_server_id}")
+            server_del_result = server_client.delete_server_account(old_server_id)
             if not server_del_result.get("ok"):
-                self._append_log(f"删除服务器旧账号 {old_account_id} 失败: {server_del_result.get('message')}")
+                self._append_log(f"删除服务器旧账号 {old_server_id} 失败: {server_del_result.get('message')}")
                 return {"ok": False, "message": f"删除服务器旧账号失败: {server_del_result.get('message')}"}
+            # 旧记录已经不代跑了：本机那一行改回本机模式，否则合并视图会立刻把它标回 server
+            if old_account.get("source") != "server":
+                old_account["run_mode"] = "local"
+                old_account.pop("server_account_id", None)
+                account_store.upsert_account(old_account)
         except Exception as exc:
             self._append_log(f"调用服务器删除旧账号接口异常: {exc}")
             return {"ok": False, "message": f"调用服务器删除旧账号接口异常: {exc}"}
@@ -814,12 +1065,17 @@ class CheckinApi:
             
             # 同步到服务器
             server_sync_result = server_client.sync_server_blob(new_account, log=self._append_log, force=True)
-            if not server_sync_result or not server_sync_result.get("ok"):
-                # 如果同步失败，尝试回滚本地账号为本地模式 (可选，取决于业务逻辑)
+            if server_sync_result is None:
                 new_account["run_mode"] = "local"
                 account_store.upsert_account(new_account)
-                self._append_log(f"新账号 {new_account_id} 上传服务器失败: {server_sync_result.get('message') if server_sync_result else '未知错误'}")
-                return {"ok": False, "message": f"新账号上传服务器失败: {server_sync_result.get('message') if server_sync_result else '未知错误'}"}
+                return {"ok": False, "message": f"新账号 {new_account_id} 没有可用 token，无法上传代跑"}
+            if not server_sync_result.get("ok"):
+                # 上传失败就把本机这行退回本机模式，别留一个「显示在代跑、其实服务器没有」的状态
+                new_account["run_mode"] = "local"
+                account_store.upsert_account(new_account)
+                reason = server_sync_result.get("message") or "未知错误"
+                self._append_log(f"新账号 {new_account_id} 上传服务器失败: {reason}")
+                return {"ok": False, "message": f"新账号上传服务器失败: {reason}"}
             
             self._append_log(f"账号 {old_account_id} 已成功更换为 {new_account_id} 并上传至服务器。")
             return {"ok": True, "message": f"账号 {old_account_id} 已成功更换为 {new_account_id}"}
@@ -866,7 +1122,9 @@ class CheckinApi:
             runs = server_client.today_runs()
             self._append_log(f"代跑今日结果: {runs}")
 
-        self._bg(worker)
+        busy = self._start_job("服务器代跑", worker)
+        if busy:
+            return busy
         return {"ok": True, "message": "已触发服务器代跑"}
 
     def clear_live_logs(self) -> dict[str, Any]:
@@ -884,7 +1142,34 @@ class CheckinApi:
         return {"ok": True}
 
     def _bg(self, fn: Callable[[], None]) -> None:
-        threading.Thread(target=fn, daemon=True).start()
+        def run() -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 - 线程里抛异常会静默消失，表现为"点了没反应"
+                self._append_log(f"后台任务异常：{exc}")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _job_running(self) -> bool:
+        with self._busy_lock:
+            return bool(self._busy)
+
+    def _start_job(self, name: str, fn: Callable[[], None]) -> dict[str, Any] | None:
+        """同名任务只允许一个在跑；返回非 None 表示已有一个在执行。"""
+        with self._busy_lock:
+            if name in self._busy:
+                return {"ok": False, "message": f"{name}仍在执行中，请等待完成"}
+            self._busy.add(name)
+
+        def wrapped() -> None:
+            try:
+                fn()
+            finally:
+                with self._busy_lock:
+                    self._busy.discard(name)
+
+        self._bg(wrapped)
+        return None
 
 
 def main() -> None:

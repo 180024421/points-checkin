@@ -10,13 +10,14 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
-from typing import Any
+from typing import Any, Callable
 
-from . import __version__, account_store, autostart, credential_store, server_client
+from . import __version__, account_store, autostart, credential_store, server_client, vault
 from .adapters import traework, workbuddy
-from .license_client import check_status, ensure_licensed, redeem
+from .license_client import check_status, data_root, ensure_licensed, redeem
 from .login import login_by_id
-from .scheduler import DailyScheduler, refresh_account_credits, run_local_all
+from .redact import mask_text
+from .scheduler import AutoSyncer, DailyScheduler, clamp_sync_minutes, run_local_all
 from .settings import load_settings, save_settings
 
 
@@ -34,6 +35,9 @@ class CheckinApp(tk.Tk):
         self.lbl_time: ttk.Label | None = None
 
         self._build_ui()
+        # DPAPI 不可用时凭证是明文落盘的，必须让用户看见
+        for warning in vault.startup_warnings(data_root()):
+            self.append_log(f"[警告] {warning}")
         self.after(0, self.refresh_license)
         self.refresh_accounts()
         self.refresh_today()
@@ -42,6 +46,16 @@ class CheckinApp(tk.Tk):
             self.scheduler.start()
             self.append_log("已启动本机日签调度（早晚双窗口）")
         self.after(2000, self._tick_refresh)
+        # 状态/积分自动同步：启动几秒后拉一次，之后按设置里的间隔查积分。
+        # 签到/批量登录在直接问供应商，用 _vendor_busy 让它们独占，同步自动让路。
+        self._vendor_busy = threading.Event()
+        self.auto_sync = AutoSyncer(
+            get_settings=lambda: self.settings,
+            is_busy=self._vendor_busy.is_set,
+            log=self.append_log,
+        )
+        if self.settings.get("auto_sync", True):
+            self.auto_sync.start()
         self._setup_tray()
         self._tick_clock()
 
@@ -255,9 +269,18 @@ class CheckinApp(tk.Tk):
         self.var_autostart = tk.BooleanVar(value=bool(self.settings.get("autostart")))
         self.var_evening = tk.BooleanVar(value=bool(self.settings.get("evening_schedule", True)))
         self.var_auto = tk.BooleanVar(value=bool(self.settings.get("auto_schedule", True)))
+        self.var_auto_sync = tk.BooleanVar(value=bool(self.settings.get("auto_sync", True)))
+        self.var_sync_minutes = tk.StringVar(value=str(self.settings.get("auto_sync_minutes") or 5))
         ttk.Checkbutton(opt, text="开机自启", variable=self.var_autostart).pack(anchor="w")
         ttk.Checkbutton(opt, text="启用早晚调度", variable=self.var_auto).pack(anchor="w")
         ttk.Checkbutton(opt, text="启用晚间补漏", variable=self.var_evening).pack(anchor="w")
+        ttk.Checkbutton(opt, text="自动同步服务器状态与积分", variable=self.var_auto_sync).pack(anchor="w")
+        sync_row = ttk.Frame(opt)
+        sync_row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(sync_row, text="同步间隔（分钟）").pack(side="left")
+        ttk.Spinbox(
+            sync_row, from_=1, to=240, increment=1, width=6, textvariable=self.var_sync_minutes
+        ).pack(side="left", padx=(6, 0))
 
         btns = ttk.Frame(self.tab_license)
         btns.pack(fill="x")
@@ -267,12 +290,30 @@ class CheckinApp(tk.Tk):
         self.btn_refresh_license.pack(side="left", padx=2)
         ttk.Button(btns, text="清理跑批日志", width=14, command=self.clear_run_logs).pack(side="left", padx=2)
 
+    def _manual_sync_task(self) -> Callable[[], None]:
+        """「刷新」「刷新积分」共用同一条同步路径：同一批 token 不被并发使用。"""
+
+        def task() -> None:
+            if self._vendor_busy.is_set():
+                self.append_log("签到/登录正在执行，请等待其完成后再同步")
+                return
+            try:
+                result = self.auto_sync.sync_once(reason="手动")
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"同步失败：{exc}")
+                return
+            if not result.get("ok"):
+                self.append_log(result.get("message") or "同步失败")
+
+        return task
+
     def _refresh_all(self) -> None:
+        """刷新 = 真的去同步一次（服务器状态 + 本机积分），不只是重读本地文件。"""
+
+        self._run_task_in_background(
+            self._manual_sync_task(), [self.btn_refresh_all], "正在同步…", on_done=self._refresh_views
+        )
         self.refresh_license()
-        self.refresh_accounts()
-        self.refresh_today()
-        self.refresh_credits_view()
-        self.append_log("已刷新")
 
     def _tick_clock(self) -> None:
         if self.lbl_time is not None:
@@ -294,7 +335,19 @@ class CheckinApp(tk.Tk):
 
         self.after(0, _append)
 
-    def _run_task_in_background(self, task_func: Callable[[], Any], buttons_to_disable: list[ttk.Button], status_message: str = "") -> None:
+    def _run_task_in_background(
+        self,
+        task_func: Callable[[], Any],
+        buttons_to_disable: list[ttk.Button],
+        status_message: str = "",
+        on_done: Callable[[], None] | None = None,
+    ) -> None:
+        """后台跑 ``task_func``；``on_done`` 在任务结束后回到主线程执行。
+
+        同步/签到这类要改数据的任务必须用 ``on_done`` 再重读界面，
+        否则主线程在任务刚派出去时就抢先渲染了一遍旧数据。
+        """
+
         def worker() -> None:
             for btn in buttons_to_disable:
                 self.after(0, lambda b=btn: b.config(state="disabled"))
@@ -304,6 +357,8 @@ class CheckinApp(tk.Tk):
             try:
                 task_func()
             finally:
+                if on_done:
+                    self.after(0, on_done)
                 for btn in buttons_to_disable:
                     self.after(0, lambda b=btn: b.config(state="enabled"))
                 if self.lbl_license_bar and status_message:
@@ -362,6 +417,9 @@ class CheckinApp(tk.Tk):
             quota_text = f"{used}/{limit}（{detail}）"
         if plan:
             quota_text += f" - {plan}"
+        if usage.get("contactVerified") is False:
+            # 服务端要求代跑前绑定联系邮箱，这里提前提示，别等上传时才报错
+            quota_text += " · 代跑邮箱未绑定"
 
         self.after(0, lambda:
             self.lbl_account_quota.configure(text="账号额度：" + quota_text)
@@ -377,27 +435,59 @@ class CheckinApp(tk.Tk):
         self.settings["autostart"] = bool(self.var_autostart.get())
         self.settings["auto_schedule"] = bool(self.var_auto.get())
         self.settings["evening_schedule"] = bool(self.var_evening.get())
+        self.settings["auto_sync"] = bool(self.var_auto_sync.get())
+        self.settings["auto_sync_minutes"] = clamp_sync_minutes(self.var_sync_minutes.get().strip())
         save_settings(self.settings)
         try:
             autostart.set_enabled(bool(self.var_autostart.get()))
         except Exception as exc:
-            self.append_log(f"开机自启设置失败: {exc}")
-            self.after(0, lambda: messagebox.showerror("设置失败", f"开机自启设置失败: {exc}"))
+            # except 结束时会解绑 exc，lambda 里直接引用它等于弹窗时才 NameError，先落成普通变量
+            tip = f"开机自启设置失败: {exc}"
+            self.append_log(tip)
+            self.after(0, lambda t=tip: messagebox.showerror("设置失败", t))
         if self.var_card.get().strip():
             result = redeem(self.settings, self.var_card.get())
-            self.after(0, lambda: messagebox.showinfo("激活", result.get("message") or str(result)))
+            # 只取 message：str(result) 里含 ticket，弹窗会把票据显示在屏幕上
+            activated = bool(result.get("valid") or result.get("ok"))
+            tip = result.get("message") or ("激活成功" if activated else "激活失败")
+            self.after(0, lambda: messagebox.showinfo("激活", tip))
+        else:
+            activated = False
         if self.settings.get("auto_schedule"):
             self.scheduler.start()
         else:
             self.scheduler.stop()
+        if self.settings.get("auto_sync", True):
+            was_running = self.auto_sync.status().get("running")
+            self.auto_sync.start()
+            # 线程还活着时 start() 不重置间隔；激活/改完设置都应该马上同步一次
+            if activated or not was_running:
+                self.auto_sync.sync_soon()
+        else:
+            self.auto_sync.stop()
         self.after(0, self.refresh_license)
 
     def refresh_accounts(self) -> None:
+        """取数放后台线程：代跑账号和签到记录都要打服务器，HTTP 不能让 Tk 主循环等。"""
+
+        def worker() -> None:
+            try:
+                today = account_store.today_run_map()
+                views = [
+                    account_store.public_account_view(row, today)
+                    for row in account_store.load_accounts()
+                ]
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"刷新账号列表失败：{mask_text(exc, 160)}")
+                return
+            self.after(0, lambda v=views: self._render_accounts(v))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_accounts(self, views: list[dict[str, Any]]) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
-        today = account_store.today_run_map()
-        for row in account_store.load_accounts():
-            view = account_store.public_account_view(row, today)
+        for view in views:
             self.tree.insert(
                 "",
                 tk.END,
@@ -415,7 +505,17 @@ class CheckinApp(tk.Tk):
             )
 
     def refresh_today(self) -> None:
-        board = account_store.today_board()
+        def worker() -> None:
+            try:
+                board = account_store.today_board()
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"刷新今日看板失败：{mask_text(exc, 160)}")
+                return
+            self.after(0, lambda b=board: self._render_today(b))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_today(self, board: dict[str, Any]) -> None:
         summary = (
             f"{board['day']}  已跑 {board['done_count']} / "
             f"未跑 {board['pending_count']} / 失败 {board['failed_count']} "
@@ -641,22 +741,31 @@ class CheckinApp(tk.Tk):
         if not ok:
             messagebox.showerror("卡密", msg)
             return
-        auth, err = workbuddy.load_local_auth(self.settings.get("workbuddy_auth_path") or None)
-        if err or not auth:
+        custom_path = self.settings.get("workbuddy_auth_path")
+        if custom_path:
+            auth, err = workbuddy.load_local_auth(custom_path)
+            auths = [auth] if auth else []
+        else:
+            auths, err = workbuddy.load_all_local_auths()
+        if not auths:
             messagebox.showerror("采集失败", err or "无登录态")
             return
-        account_store.upsert_account(
-            {
-                "provider": "workbuddy",
-                "label": auth.get("nickname") or auth.get("uid"),
-                "identity": auth.get("uid"),
-                "run_mode": "local",
-                "enabled": True,
-                "token_blob": auth,
-                "last_error": "",
-            }
+        for auth in auths:
+            account_store.upsert_account(
+                {
+                    "provider": "workbuddy",
+                    "label": auth.get("nickname") or auth.get("uid"),
+                    "identity": auth.get("uid"),
+                    "run_mode": "local",
+                    "enabled": True,
+                    "token_blob": auth,
+                    "last_error": "",
+                }
+            )
+        self.append_log(
+            f"已采集 WorkBuddy {len(auths)} 个账号："
+            + "、".join(str(a.get("nickname") or a.get("uid")) for a in auths)
         )
-        self.append_log(f"已采集 WorkBuddy：{auth.get('nickname') or auth.get('uid')}")
         self.refresh_accounts()
         self.refresh_today()
 
@@ -714,23 +823,24 @@ class CheckinApp(tk.Tk):
         tags = traework.user_tags()
         saved: list[str] = []
         for auth in todo:
+            blocked = traework._blocked_region(auth)
+            if blocked:
+                self.append_log(f"跳过 {auth.get('user_id')}：区域 {blocked}，签到仅支持 CN 区")
             if self.settings.get("traework_ug_api_base"):
                 auth["ug_api_base"] = self.settings["traework_ug_api_base"]
             uid = str(auth.get("user_id") or "")
             if uid and tags.get(uid):
+                # 下面 upsert 的 token_blob 就是 auth，标签写在这里即可
                 auth["user_tag"] = tags[uid]
-                token_blob = account_data.get("token_blob", {})
-                token_blob["user_tag"] = tags[uid]
-                account_data["token_blob"] = token_blob
             account_store.upsert_account(
                 {
                     "provider": "traework",
                     "label": uid or auth.get("nickname") or "traework",
                     "identity": uid or auth.get("auth_key") or "traework",
                     "run_mode": "local",
-                    "enabled": True,
+                    "enabled": not blocked,
                     "token_blob": auth,
-                    "last_error": "",
+                    "last_error": f"区域 {blocked}，签到仅支持 CN 区，已停用" if blocked else "",
                 }
             )
             saved.append(uid or "未知")
@@ -743,57 +853,98 @@ class CheckinApp(tk.Tk):
         )
         self.refresh_accounts()
 
+    # ------------------------------------------------------- 代挂额度 / 联系邮箱
+    def _bind_contact_flow(self) -> bool:
+        """弹窗引导「绑定邮箱 → 输入验证码」，返回是否绑定成功。"""
+        email = simpledialog.askstring(
+            "联系邮箱",
+            "服务器代跑需要绑定联系邮箱（账号异常时服务端会通知这个邮箱）：",
+            parent=self,
+        )
+        if not email:
+            return False
+        result = server_client.bind_contact(email)
+        if not result.get("ok"):
+            messagebox.showerror("绑定失败", result.get("message") or "服务器拒绝了绑定请求")
+            return False
+        code = simpledialog.askstring("邮箱验证码", "验证码已发送到该邮箱，请输入：", parent=self)
+        if not code:
+            return False
+        checked = server_client.verify_contact(code)
+        if not checked.get("ok"):
+            messagebox.showerror("验证失败", checked.get("message") or "验证码不正确或已过期")
+            return False
+        messagebox.showinfo("完成", "联系邮箱已绑定")
+        return True
+
+    def _contact_gate(self) -> bool:
+        """代跑前置校验（见 ``account_store.contact_gate``）；未绑定时弹窗引导，返回 False = 不继续。"""
+        if account_store.contact_gate() is None:
+            return True
+        if not self._bind_contact_flow():
+            return False
+        return account_store.contact_gate(force=False) is None
+
     def set_mode(self, mode: str) -> None:
         account_id = self._selected_account_id()
         if not account_id:
             messagebox.showinfo("提示", "请先选中账号")
             return
-        accounts = account_store.load_accounts()
-        for row in accounts:
-            if str(row.get("id")) == account_id:
-                row["run_mode"] = mode
-                break
-        account_store.save_accounts(accounts)
+        if mode == "server" and not self._contact_gate():
+            return
+        result = account_store.set_run_mode(account_id, mode)
+        self.append_log(str(result.get("message") or ""))
+        if not result.get("ok"):
+            messagebox.showerror("模式", result.get("message") or "失败")
         self.refresh_accounts()
 
     def delete_selected(self) -> None:
         account_id = self._selected_account_id()
         if not account_id:
             return
-        if messagebox.askyesno("确认", "删除本地账号记录？"):
-            account_store.delete_account(account_id)
-            self.refresh_accounts()
-            self.refresh_today()
+        if not messagebox.askyesno("确认", "删除该账号？服务器上的代跑记录也会一并删除。"):
+            return
+        result = account_store.delete_account_with_server(account_id, log=self.append_log)
+        if not result.get("ok"):
+            messagebox.showerror("删除", result.get("message") or "删除失败")
+        self.refresh_accounts()
+        self.refresh_today()
 
     def run_now(self) -> None:
         def worker() -> None:
-            results = run_local_all(require_license=True, log=self.append_log)
-            self.after(0, self.refresh_accounts)
-            self.after(0, self.refresh_today)
-            self.after(0, self.refresh_credits_view)
-            self.append_log(f"本机签到完成，共 {len(results)} 条")
+            self._vendor_busy.set()  # 自动同步让路，别在签到时并发查同一个 token
+            try:
+                results = run_local_all(require_license=True, log=self.append_log)
+                self.append_log(f"本机签到完成，共 {len(results)} 条")
+            finally:
+                self._vendor_busy.clear()
+                self.after(0, self.refresh_accounts)
+                self.after(0, self.refresh_today)
+                self.after(0, self.refresh_credits_view)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_all_credits(self) -> None:
-        def worker() -> None:
-            for account in account_store.load_accounts():
-                if not account.get("enabled", True):
-                    continue
-                info = refresh_account_credits(account)
-                self.append_log(
-                    f"积分查询 {account.get('provider')}/{account.get('label')}: "
-                    f"{info.get('message') or info}"
-                )
-            self.after(0, self.refresh_accounts)
-            self.after(0, self.refresh_credits_view)
+        """「刷新积分」与「刷新」同一条路径：共用串行槽和限速，
+        否则两个入口能对同一批账号并发问供应商。"""
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_task_in_background(
+            self._manual_sync_task(), [self.btn_refresh_all], "正在刷新积分…", on_done=self._refresh_views
+        )
+
+    def _refresh_views(self) -> None:
+        """重读界面：必须在同步任务结束后再调，提前读只会显示同步前的旧数据。"""
+        self.refresh_accounts()
+        self.refresh_today()
+        self.refresh_credits_view()
 
     def upload_delegate(self) -> None:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
             messagebox.showerror("卡密", msg)
+            return
+        if not self._contact_gate():
+            self.append_log("未绑定联系邮箱，已取消代跑上传")
             return
         account_id = self._selected_account_id()
         accounts = account_store.load_accounts()
@@ -806,6 +957,9 @@ class CheckinApp(tk.Tk):
                     self.append_log(f"跳过无 token 账号 {account.get('id')}")
                     continue
                 account["run_mode"] = "server"
+                if str(account.get("provider")) == "workbuddy":
+                    # 告诉服务器：这个账号代跑时要不要顺带做成长任务
+                    account["task_enabled"] = self.settings.get("workbuddy_task_mode") == "server"
                 account_store.upsert_account(account)
                 result = server_client.sync_server_blob(account, log=self.append_log, force=True)
                 if not result:
@@ -858,6 +1012,11 @@ class CheckinApp(tk.Tk):
 
     def _force_quit(self) -> None:
         self.scheduler.stop()
+        self.auto_sync.stop()
+        try:
+            account_store.flush_live_logs()  # 实时日志缓冲落盘，退出前补一次
+        except Exception as e:
+            print(f"Error flushing live log: {e}")
         if self._tray:
             try:
                 self._tray.stop()

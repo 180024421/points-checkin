@@ -218,7 +218,14 @@ def checkin_with_token(token: str, uid: str, *, timeout: float = 20.0) -> Checki
             return False
         return bool((result.raw_summary or {}).get("retryable"))
 
-    return retry_call(_once, retries=5, min_wait=8, max_wait=20, should_retry=_should_retry)
+    return retry_call(
+        _once,
+        retries=5,
+        min_wait=3,
+        max_wait=25,
+        max_total_sec=90,
+        should_retry=_should_retry,
+    )
 
 
 def checkin_from_local(auth_path: str | Path | None = None) -> CheckinResult:

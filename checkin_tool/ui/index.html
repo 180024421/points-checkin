@@ -927,6 +927,25 @@
     </div>
   </div>
 
+  <!-- 绑定联系邮箱：服务器代跑的前置条件 -->
+  <div class="modal" id="modal-bind">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>绑定联系邮箱</h2>
+      </div>
+      <p class="lead">服务器代跑需要联系邮箱：账号签到异常时服务端会往这个邮箱发通知。填写后会收到一封带验证码的邮件。</p>
+      <div class="field"><span>邮箱</span><input id="bind-email" type="email" placeholder="you@example.com"
+          autocomplete="off"></div>
+      <div class="field" id="bind-code-row" style="display:none"><span>验证码</span><input id="bind-code"
+          autocomplete="off" placeholder="邮件里的验证码"></div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-bind-cancel">取消</button>
+        <button class="primary" id="btn-bind-send">发送验证码</button>
+        <button class="primary" id="btn-bind-verify" style="display:none">完成绑定</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 更换账号 -->
   <div class="modal" id="modal-replace">
     <div class="panel-box">
@@ -959,6 +978,7 @@
         <span class="chip off" id="chip-license">授权检测中</span>
         <span class="chip off" id="chip-account-limit">账号限制：-</span>
         <span class="chip off" id="chip-today">今日 —</span>
+        <span class="chip off" id="chip-sync" title="点击立即同步服务器状态与积分">同步 —</span>
         <button class="sm on-topbar" id="btn-refresh">刷新</button>
       </div>
     </header>
@@ -1126,6 +1146,12 @@
             <label class="chk"><input type="checkbox" id="set-trae-capture"> 自动捕获 Trae CN 登录</label>
           </div>
           <div class="row gap-md" style="align-items:center">
+            <label class="chk"><input type="checkbox" id="set-auto-sync"> 自动同步状态与积分</label>
+            <span class="label" style="margin:0">积分同步间隔（分钟）</span>
+            <input type="number" id="set-sync-minutes" min="1" max="240" style="max-width:90px">
+          </div>
+          <p class="hint">开启后程序启动几秒内先同步一次，之后每隔设定间隔自动查积分；「哪些号跑了」走我们自己的服务器，界面每 30 秒自动重读，不用手点。</p>
+          <div class="row gap-md" style="align-items:center">
             <span class="label" style="margin:0">WorkBuddy 成长任务</span>
             <select id="set-wb-mode" style="max-width:220px">
               <option value="off">关闭</option>
@@ -1191,14 +1217,28 @@
     const $ = (id) => document.getElementById(id);
     let state = { accounts: [], credentials: [], board: {}, license: {}, settings: {} };
 
-    function logLine(msg, cls = '') {
+    function logLine(msg, cls = '', at) {
       const el = $('log');
       const div = document.createElement('div');
       if (cls) div.className = cls;
-      const t = new Date().toLocaleTimeString();
-      div.textContent = `[${t}] ${msg}`;
+      div.textContent = `[${fmtLogTime(at)}] ${msg}`;
       el.prepend(div);
       while (el.children.length > 200) el.removeChild(el.lastChild);
+    }
+
+    // 日志里的 at 是后端写的本地时间（ISO 秒级）。重放历史时用真实事件时间，
+    // 否则整屏日志都会打上"刚刚"的时间戳；当天只显示时分秒，跨天补上月日。
+    function fmtLogTime(at) {
+      if (!at || typeof at !== 'string') return new Date().toLocaleTimeString();
+      const d = new Date(at);
+      if (isNaN(d.getTime())) return at.slice(0, 8); // 老数据只有 HH:MM:SS
+      const now = new Date();
+      const hm = d.toTimeString().slice(0, 8);
+      return sameDay(d, now) ? hm : `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`;
+    }
+
+    function sameDay(a, b) {
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
     }
 
     async function call(name, ...args) {
@@ -1265,15 +1305,17 @@
         <div class="title">
           <span>${esc(r.provider)}</span>
           <span class="tag">${esc(r.label || r.id)}</span>
+          ${r.source === 'server' ? '<span class="tag">仅服务器</span>' : ''}
           ${r.token_expired ? '<span class="tag bad">已过期</span>' : ''}
         </div>
         <div class="meta">${r.run_mode === 'server' ? '代跑' : '本机'} · ${esc(r.today_status || '未跑')} · 积分 ${esc(r.last_credits ?? '-')} · 连签 ${esc(r.last_streak ?? '-')}</div>
         ${r.last_error ? `<div class="err">${esc(r.last_error)}</div>` : ''}
       </div>
       <div class="actions">
+        ${r.source === 'server' ? '' : `
         <button class="sm" data-act="local">本机</button>
         <button class="sm" data-act="server">代跑</button>
-        <button class="sm" data-act="upload">上传</button>
+        <button class="sm" data-act="upload">上传</button>`}
         ${r.run_mode === 'server' ? `<button class="sm" data-act="replace" data-old-id="${esc(r.id)}">更换</button>` : ''}
         <button class="sm danger" data-act="del">删除</button>
       </div>
@@ -1361,17 +1403,30 @@
 
     let revokedNotified = '';
 
+    function openContactBind() {
+      $('bind-code-row').style.display = 'none';
+      $('btn-bind-verify').style.display = 'none';
+      $('btn-bind-send').style.display = '';
+      $('modal-bind').classList.add('show');
+    }
+
     function applyLicense(lic, usage) {
-      const valid = !!(lic && lic.valid);
+      lic = lic || {};
+      usage = usage || {};
+      // 额度优先取服务端代挂权益（usage.limit = /entitlement/info 的 quota）；
+      // 内层 license 的 accountLimit 是设备座位数，只在离线时兜底。
+      const inner = lic.license && typeof lic.license === 'object' ? lic.license : lic;
+      const valid = !!(lic.valid != null ? lic.valid : inner.valid);
       const chip = $('chip-license');
       chip.textContent = valid ? '已授权' : '未授权';
       chip.className = 'chip ' + (valid ? 'ok' : 'warn');
       // 按账号数计费：展示套餐 + 已用/上限
-      const limit = (lic && lic.accountLimit != null) ? Number(lic.accountLimit) : null;
-      const used = (usage && usage.used != null)
+      const limit = (usage.limit != null) ? Number(usage.limit)
+        : (inner.accountLimit != null ? Number(inner.accountLimit) : null);
+      const used = (usage.used != null)
         ? Number(usage.used)
-        : ((lic && lic.accountUsed != null) ? Number(lic.accountUsed) : 0);
-      const plan = (usage && usage.planLabel) || (lic && lic.accountPlanLabel) || '';
+        : ((inner.accountUsed != null) ? Number(inner.accountUsed) : 0);
+      const plan = usage.planLabel || inner.accountPlanLabel || inner.planLabel || '';
       const limitText = limit === null ? '不限账号' : `${limit} 个账号`;
       if (limit !== null) {
         // 额度用满或已超限时给出升级引导
@@ -1383,7 +1438,39 @@
       }
       const over = limit !== null && used > limit;
       $('chip-account-limit').className = 'chip ' + (valid ? (over ? 'warn' : 'ok') : 'off');
-      setGate(!valid, lic && lic.message ? lic.message : '请输入卡密完成授权，授权与本机绑定。');
+      // 服务端要求代跑前先绑定联系邮箱：未绑定时把入口直接挂在额度标签上
+      const limitChip = $('chip-account-limit');
+      if (usage.contactVerified === false) {
+        limitChip.textContent += ' · 代跑邮箱未绑定，点此绑定';
+        limitChip.className = 'chip warn';
+        limitChip.style.cursor = 'pointer';
+        limitChip.onclick = openContactBind;
+      } else {
+        limitChip.style.cursor = '';
+        limitChip.onclick = null;
+      }
+      const msg = lic.message || inner.message;
+      setGate(!valid, msg ? msg : '请输入卡密完成授权，授权与本机绑定。');
+    }
+
+    function applySync(s) {
+      s = s || {};
+      const chip = $('chip-sync');
+      chip.style.cursor = 'pointer';
+      chip.onclick = function () { startSync(); };
+      if (s.busy) {
+        chip.textContent = '同步中…';
+        chip.className = 'chip warn';
+        return;
+      }
+      if (!s.enabled) {
+        chip.textContent = '自动同步已关（点此同步）';
+        chip.className = 'chip off';
+        return;
+      }
+      chip.textContent = s.at ? `已同步 ${s.at} · 每 ${s.minutes} 分` : '首次同步中…';
+      chip.className = 'chip ' + (s.failed ? 'warn' : 'ok');
+      chip.title = s.message || '点击立即同步服务器状态与积分';
     }
 
     function applySettings(s) {
@@ -1395,6 +1482,8 @@
       $('set-auto').checked = s.auto_schedule !== false;
       $('set-evening').checked = s.evening_schedule !== false;
       $('set-trae-capture').checked = s.traework_auto_capture !== false;
+      $('set-auto-sync').checked = s.auto_sync !== false;
+      $('set-sync-minutes').value = s.auto_sync_minutes || 5;
       $('set-wb-mode').value = s.workbuddy_task_mode || 'off';
       $('set-wb-chat').checked = s.workbuddy_chat_tasks !== false;
     }
@@ -1409,11 +1498,22 @@
         : '自动捕获已停止：在下方勾选「自动捕获 Trae CN 登录」并保存后生效。';
     }
 
-    async function refreshAll() {
+    // 软刷新每 30 秒一次，整表 innerHTML 重建会把滚动位置、悬停和选中都清掉。
+    // 所以按数据等价判断：内容没变就不碰 DOM。
+    const _renderKeys = {};
+    function dataChanged(key, value) {
+      const s = JSON.stringify(value === undefined ? null : value);
+      if (_renderKeys[key] === s) return false;
+      _renderKeys[key] = s;
+      return true;
+    }
+
+    async function refreshAll(soft) {
       const data = await call('get_bootstrap');
       state = data;
       $('ver').textContent = 'v' + (data.version || '');
       applyLicense(data.license || {}, data.accountUsage || {});
+      applySync(data.sync || {});
       // 卡密失效被踢出：只弹一次提示（后台守卫会同步停掉签到并清票据）
       const revoked = data.revoked || null;
       if (revoked && revoked.at !== revokedNotified) {
@@ -1422,31 +1522,59 @@
           alert('卡密已失效，已退出登录。\n原因：' + (revoked.reason || '') + '\n\n请重新输入有效卡密后继续使用。');
         }, 120);
       }
-      applySettings(data.settings || {});
+      // 定时软刷新不动设置表单（否则用户正在填的卡密/地址会被回填覆盖），也不重放日志
+      if (!soft) applySettings(data.settings || {});
       applyTraeWatch(data.traework_watch || {});
-      renderStats(data.board || {});
-      renderAccounts(data.accounts || []);
-      renderCreds(data.credentials || []);
-
-      // 填充积分筛选器
-      const creditFilter = $('credit-account-filter');
-      creditFilter.innerHTML = '<option value="">所有账号</option>'; // 总是包含所有账号选项
-      (data.accounts || []).forEach(acc => {
-        const option = document.createElement('option');
-        option.value = acc.id;
-        option.textContent = `${acc.provider} - ${acc.label || acc.id}`;
-        creditFilter.appendChild(option);
-      });
-      // 保持当前选中状态
-      const currentSelectedAccountId = creditFilter.value;
-      if (currentSelectedAccountId) {
-        creditFilter.value = currentSelectedAccountId;
+      if (dataChanged('board', data.board)) renderStats(data.board || {});
+      const accounts = data.accounts || [];
+      if (dataChanged('accounts', accounts)) {
+        renderAccounts(accounts);
+        // 填充积分筛选器：先记下当前选项，重建 <option> 会把选中值清成第一项
+        const creditFilter = $('credit-account-filter');
+        const currentSelectedAccountId = creditFilter.value;
+        creditFilter.innerHTML = '<option value="">所有账号</option>'; // 总是包含所有账号选项
+        accounts.forEach(acc => {
+          const option = document.createElement('option');
+          option.value = acc.id;
+          option.textContent = `${acc.provider} - ${acc.label || acc.id}`;
+          creditFilter.appendChild(option);
+        });
+        creditFilter.value = currentSelectedAccountId || '';
       }
+      if (dataChanged('credentials', data.credentials)) renderCreds(data.credentials || []);
 
       // 刷新积分历史视图
       await refreshCreditsView();
 
-      (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l)));
+      if (!soft) (data.logs || []).slice().reverse().forEach(l => logLine(l.message || JSON.stringify(l), '', l.at));
+    }
+
+    // 视图定时重读：账号/看板走后端 15 秒 TTL 缓存，这一步几乎不打网络
+    function pollView() {
+      setTimeout(async function () {
+        try { await refreshAll(true); } catch (_) { }
+        pollView();
+      }, 30000);
+    }
+
+    let syncPollTimer = null;
+    function pollSyncUntilIdle() {
+      clearTimeout(syncPollTimer);
+      syncPollTimer = setTimeout(async function () {
+        try { await refreshAll(true); } catch (_) { }
+        if (state && state.sync && state.sync.busy) pollSyncUntilIdle();
+      }, 2000);
+    }
+
+    async function startSync(apiName) {
+      let r = null;
+      try { r = await call(apiName || 'sync_now'); } catch (_) { }
+      if (!r || !r.ok) {
+        logLine((r && r.message) || '同步任务未能启动', 'err');
+        return;
+      }
+      applySync({ busy: true });
+      pollSyncUntilIdle();
     }
 
     // 新增函数，用于刷新积分历史视图
@@ -1454,7 +1582,8 @@
       const creditFilter = $('credit-account-filter');
       const accountId = creditFilter.value || null;
       const creditsResult = await call('credit_history', accountId);
-      renderCredits(creditsResult.items || []);
+      const items = creditsResult.items || [];
+      if (dataChanged('creditItems', items)) renderCredits(items);
     }
 
     async function act(fn, okMsg) {
@@ -1462,6 +1591,11 @@
         const r = await fn();
         logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
         if (!r.ok && r.message) showToast(r.message, 'err');
+        // 后端要求先绑定联系邮箱：弹绑定框，别只报一句错误
+        if (!r.ok && r.needBind) {
+          openContactBind();
+          return r;
+        }
 
         // 处理替换建议
         if (r.ok && r.replacement_suggestion) {
@@ -1482,6 +1616,20 @@
       }
     }
 
+    $('btn-bind-cancel').onclick = () => $('modal-bind').classList.remove('show');
+    $('btn-bind-send').onclick = async () => {
+      const r = await act(() => call('bind_contact', $('bind-email').value));
+      if (r && r.ok) {
+        $('bind-code-row').style.display = '';
+        $('btn-bind-send').style.display = 'none';
+        $('btn-bind-verify').style.display = '';
+      }
+    };
+    $('btn-bind-verify').onclick = async () => {
+      const r = await act(() => call('verify_contact', $('bind-code').value));
+      if (r && r.ok) $('modal-bind').classList.remove('show');
+    };
+
     document.querySelectorAll('.tab').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
@@ -1491,9 +1639,9 @@
       });
     });
 
-    $('btn-refresh').onclick = () => act(() => call('get_bootstrap'), '已刷新');
+    $('btn-refresh').onclick = () => startSync();
     $('btn-run-local').onclick = () => act(() => call('run_local_now'));
-    $('btn-refresh-credits').onclick = () => act(() => call('refresh_credits'));
+    $('btn-refresh-credits').onclick = () => startSync('refresh_credits');
     $('btn-run-server').onclick = () => act(() => call('run_server_now'));
     ['btn-import-cred', 'btn-import-cred-2'].forEach(id => $(id).onclick = () => $('modal-cred').classList.add('show'));
     ['btn-login-all', 'btn-login-all-2'].forEach(id => $(id).onclick = () => act(() => call('unified_login', '')));
@@ -1538,7 +1686,7 @@
       if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
       if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
       if (actName === 'upload') await act(() => call('upload_delegate', id));
-      if (actName === 'del' && confirm('删除该账号？')) await act(() => call('delete_account', id));
+      if (actName === 'del' && confirm('删除该账号？服务器上的代跑记录也会一并删除。')) await act(() => call('delete_account', id));
       if (actName === 'replace') {
         oldAccountIdToReplace = btn.dataset.oldId;
         $('modal-replace').classList.add('show');
@@ -1565,16 +1713,19 @@
       $('btn-replace-confirm').dataset.oldAccountId = ''; // 清除暂存的旧账号ID
     };
     $('btn-save-redeem').onclick = async () => {
-      await call('save_settings', {
+      const saved = await act(() => call('save_settings', {
         license_base_url: $('set-base').value.trim(),
         card_code: $('set-card').value.trim(),
         autostart: $('set-autostart').checked,
         auto_schedule: $('set-auto').checked,
         evening_schedule: $('set-evening').checked,
         traework_auto_capture: $('set-trae-capture').checked,
+        auto_sync: $('set-auto-sync').checked,
+        auto_sync_minutes: Math.min(240, Math.max(1, Number($('set-sync-minutes').value) || 5)),
         workbuddy_task_mode: $('set-wb-mode').value,
         workbuddy_chat_tasks: $('set-wb-chat').checked,
-      });
+      }), '设置已保存');
+      if (!saved || !saved.ok) return;
       await act(() => call('redeem', $('set-card').value.trim()));
     };
     $('btn-notice-ok').onclick = () => closeNotice(true);
@@ -1586,7 +1737,8 @@
     };
     $('btn-license-refresh').onclick = () => act(() => call('license_check_now'));
     $('btn-gate-redeem').onclick = async () => {
-      await call('save_settings', { card_code: $('gate-code').value.trim() });
+      const saved = await act(() => call('save_settings', { card_code: $('gate-code').value.trim() }));
+      if (!saved || !saved.ok) return;
       await act(() => call('redeem', $('gate-code').value.trim()));
     };
     $('btn-gate-refresh').onclick = () => act(() => call('license_check_now'));
@@ -1680,6 +1832,7 @@
         poll();
         pollTrae();
         pollNotices();
+        pollView();
       } catch (e) {
         logLine(String(e), 'err');
       }

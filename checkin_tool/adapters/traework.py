@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from ..redact import brief
 from ..retry_util import retry_call
 from .base import CheckinResult, mask_secret
 
@@ -221,7 +223,7 @@ def _extract_token_from_obj(obj: Any) -> dict[str, Any] | None:
         scope = obj["account"].get("scope")
     refresh_token = obj.get("refreshToken") or obj.get("refresh_token")
     expired_at = obj.get("expiredAt") or obj.get("expiresAt") or obj.get("expired_at")
-    refresh_expired_at = obj.get("refreshExpiredAt") or obj.get("refreshExpiredAt")
+    refresh_expired_at = obj.get("refreshExpiredAt") or obj.get("refresh_expired_at")
     if token:
         return {
             "token": str(token),
@@ -423,10 +425,12 @@ def _auths_from_vscdb(gs: Path) -> tuple[list[dict[str, Any]], str | None]:
     device_headers = load_device_headers(gs)
     try:
         conn = sqlite3.connect(str(db))
-        rows = conn.execute(
-            "SELECT key, value FROM ItemTable WHERE key LIKE 'iCubeAuthInfo%'"
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM ItemTable WHERE key LIKE 'iCubeAuthInfo%'"
+            ).fetchall()
+        finally:
+            conn.close()
     except Exception as exc:
         return [], f"读取 state.vscdb 失败: {exc}"
     storage_like = {str(k): v for k, v in rows}
@@ -722,16 +726,15 @@ def refresh_traework_token(blob: dict[str, Any], *, timeout: float = 30.0) -> tu
         return None, "缺少 refreshToken / 设备私钥 / ugApi，无法自动续期（请重新采集）"
     try:
         pkey = serialization.load_pem_private_key(priv.encode("utf-8"), password=None)
-    except Exception as exc:
-        return None, f"私钥解析失败: {exc}"
-
-    import socket
-    import time
-
-    ts = int(time.time())
-    nonce = os.urandom(16).hex()
-    message = f"POST {EXCHANGE_PATH} {CLIENT_ID} {refresh_token} {ts} {nonce}".encode("utf-8")
-    sig = pkey.sign(message, ec.ECDSA(hashes.SHA256()))
+        ts = int(time.time())
+        nonce = os.urandom(16).hex()
+        message = f"POST {EXCHANGE_PATH} {CLIENT_ID} {refresh_token} {ts} {nonce}".encode("utf-8")
+        # 采集到的设备密钥类型不由我们决定（注释里的历史账号是 RSA），签名算法不匹配
+        # 会在这里抛 UnsupportedAlgorithm / ValueError：抛出去会一路穿到调度线程并让它退出，
+        # 所以和解析一起兜住，续期失败退回旧 token 继续签到。
+        sig = pkey.sign(message, ec.ECDSA(hashes.SHA256()))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"设备私钥签名失败: {exc}"
     signature = base64.b64encode(sig).decode("utf-8")
 
     device_info = {
@@ -757,7 +760,8 @@ def refresh_traework_token(blob: dict[str, Any], *, timeout: float = 30.0) -> tu
     headers = {"Content-Type": "application/json", "x-cloudide-token": access}
     http, resp = _api_post(f"{base}{EXCHANGE_PATH}", headers, timeout=timeout, data=payload)
     if http != 200 or not isinstance(resp, dict):
-        return None, f"续期请求失败 HTTP {http}: {str(resp)[:200]}"
+        # 响应体可能整份就是 token，必须脱敏后再拼进 last_error（会落盘 + 显示到界面）
+        return None, f"续期请求失败 HTTP {http}: {brief(resp)}"
 
     # 响应可能嵌套在 Result / data 中
     data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
@@ -770,7 +774,7 @@ def refresh_traework_token(blob: dict[str, Any], *, timeout: float = 30.0) -> tu
         or data.get("access_token")
     )
     if not new_token:
-        return None, f"续期响应缺少 token: {str(resp)[:200]}"
+        return None, f"续期响应缺少 token: {brief(resp)}"
     new_blob = dict(blob)
     new_blob["access_token"] = str(new_token)
     new_blob["token"] = str(new_token)
@@ -778,8 +782,10 @@ def refresh_traework_token(blob: dict[str, Any], *, timeout: float = 30.0) -> tu
     new_blob["refresh_token"] = str(data.get("refreshToken") or data.get("refresh_token") or refresh_token)
     if data.get("expiredAt") or data.get("expiresAt"):
         new_blob["token_expired_at"] = str(data.get("expiredAt") or data.get("expiresAt"))
-    if data.get("refreshExpiredAt") or data.get("refreshExpiredAt"):
-        new_blob["refresh_expired_at"] = str(data.get("refreshExpiredAt") or data.get("refreshExpiredAt"))
+    if data.get("refreshExpiredAt") or data.get("refresh_expired_at"):
+        new_blob["refresh_expired_at"] = str(
+            data.get("refreshExpiredAt") or data.get("refresh_expired_at")
+        )
     return new_blob, None
 
 
@@ -1006,16 +1012,24 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
                         message="服务器繁忙/网络失败，将重试",
                         raw_summary={"base": base, "code": code2, "retryable": True},
                     )
-                last_err = f"领取失败 HTTP {http2} / {resp2}"
+                last_err = f"领取失败 HTTP {http2} / {brief(resp2)}"
                 continue
 
-            last_err = f"{base} HTTP {http} / {str(resp)[:160]}"
+            last_err = f"{base} HTTP {http} / {brief(resp, 160)}"
         return CheckinResult(ok=False, provider="traework", message=last_err)
 
     def _should_retry(result: CheckinResult) -> bool:
         return (not result.ok) and bool((result.raw_summary or {}).get("retryable"))
 
-    return retry_call(_once, retries=10, min_wait=15, max_wait=30, should_retry=_should_retry)
+    # 多账号串行跑，单个账号最多占用 3 分钟重试预算
+    return retry_call(
+        _once,
+        retries=10,
+        min_wait=5,
+        max_wait=40,
+        max_total_sec=180,
+        should_retry=_should_retry,
+    )
 
 
 def checkin_from_local(user_dir: str | Path | None = None) -> CheckinResult:

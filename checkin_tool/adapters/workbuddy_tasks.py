@@ -26,6 +26,8 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ..redact import brief as _brief_resp, mask_text
+
 BASE = "https://www.workbuddy.cn"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -109,6 +111,8 @@ class WorkBuddyTaskRunner:
         self.done: list[str] = []
         self.failed: list[str] = []
         self.rest: list[str] = []
+        # 任务列表最近一次取失败的原因：用来区分「本期真没有任务」和「接口挂了所以看不到」
+        self.tasks_error: str | None = None
 
     # ------------------------------------------------------------------ 基础
 
@@ -154,19 +158,30 @@ class WorkBuddyTaskRunner:
         except HTTPError as exc:
             return exc.code, _safe_json(_read(exc))
         except URLError as exc:
-            return -1, {"msg": f"网络失败: {exc}"}
+            return -1, {"msg": f"网络失败: {mask_text(exc, 120)}"}
         except Exception as exc:  # noqa: BLE001
-            return -1, {"msg": str(exc)}
+            return -1, {"msg": mask_text(exc, 120)}
 
     # ------------------------------------------------------------------ 任务读写
 
     def list_tasks(self) -> list[dict[str, Any]]:
+        """任务列表。约定「永不抛异常」：prog/_finished/领奖都直接调用它，
+        接口挂掉时只返回空列表（等价于「本期没有这些任务」→ 跳过，不做无谓动作）。
+        """
         try:
             status, resp = self._req("GET", "/v2/activity/growth/tasks", timeout=25)
-        except Exception:  # noqa: BLE001
+            if status != 200:
+                self.tasks_error = f"HTTP {status}"
+                self._say(f"   拉取任务列表失败: {_brief_resp(resp)}")
+            else:
+                self.tasks_error = None
+            data = resp.get("data") if isinstance(resp, dict) else None
+            tasks = data.get("tasks") if isinstance(data, dict) else None
+            return [t for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []
+        except Exception as exc:  # noqa: BLE001
+            self.tasks_error = mask_text(exc, 80)
+            self._say(f"   拉取任务列表异常: {mask_text(exc, 80)}")
             return []
-        tasks = resp.get("data", {}).get("tasks") if isinstance(resp, dict) else None
-        return [t for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []
 
     def prog(self, code: str) -> tuple[str, Any, Any]:
         """返回 (accept_status, current, target)。"""
@@ -270,8 +285,8 @@ class WorkBuddyTaskRunner:
                             text += (choice.get("delta") or {}).get("content", "") or ""
                     except Exception:
                         continue
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - 失败要留痕，否则 chat_n 会静默空转 n 次
+            self._say(f"   [webchat:{name}] 对话请求失败: {mask_text(exc, 120)}")
         return conv_id, text
 
     def _chat_events(self, conv_id: str, prompt: str, text: str) -> list[dict[str, Any]]:
@@ -405,14 +420,18 @@ class WorkBuddyTaskRunner:
             self._sleep(3)
             self._mark("playbook_prompt", *self.prog("playbook_prompt"))
 
-    def _experts(self, kind: str) -> list[dict[str, Any]]:
-        """拉专家市场（失败用内置兜底）。"""
+    def _experts(self, *kinds: str) -> list[dict[str, Any]]:
+        """拉专家市场，按 kinds 顺序取第一个非空字段（失败用内置兜底）。"""
         try:
             req = Request(EXPERT_MARKETPLACE_URL, method="GET", headers={"User-Agent": UA})
             with urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8", "ignore"))
             node = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
-            items = (node or {}).get(kind) or []
+            items: Any = []
+            for kind in kinds:
+                items = (node or {}).get(kind) or []
+                if isinstance(items, list) and items:
+                    break
             out = []
             for it in items:
                 if not isinstance(it, dict):
@@ -433,7 +452,7 @@ class WorkBuddyTaskRunner:
     def t_expert_5(self) -> None:
         if self._finished("expert_5"):
             return
-        experts = self._experts("experts") or self._experts("normalExperts")
+        experts = self._experts("experts", "normalExperts")
         for i in range(5):
             if self._finished("expert_5"):
                 break
@@ -454,7 +473,7 @@ class WorkBuddyTaskRunner:
     def t_team_3(self) -> None:
         if self._finished("Expert_team_use_3"):
             return
-        teams = self._experts("teams") or self._experts("teamExperts")
+        teams = self._experts("teams", "teamExperts")
         for i in range(3):
             if self._finished("Expert_team_use_3"):
                 break
@@ -561,7 +580,7 @@ class WorkBuddyTaskRunner:
                     break
             self._say(f"   抽奖: {'、'.join(won) if won else '无结果'}")
         except Exception as exc:  # noqa: BLE001
-            self._say(f"   抽奖异常: {str(exc)[:50]}")
+            self._say(f"   抽奖异常: {mask_text(exc, 60)}")
 
     def t_blindbox(self) -> None:
         try:
@@ -584,7 +603,7 @@ class WorkBuddyTaskRunner:
                 self._sleep(1.5)
             self._say(f"   盲盒: {'、'.join(got) if got else '开启失败'}")
         except Exception as exc:  # noqa: BLE001
-            self._say(f"   盲盒异常: {str(exc)[:50]}")
+            self._say(f"   盲盒异常: {mask_text(exc, 60)}")
 
     def t_buddy_info(self) -> None:
         _, r = self._req("GET", "/v2/activity/growth/buddy/info")
@@ -633,7 +652,7 @@ class WorkBuddyTaskRunner:
             else:
                 self._say(f"   派猫猫旅行: 出发失败 {(rr or {}).get('msg', '')}")
         except Exception as exc:  # noqa: BLE001
-            self._say(f"   派猫猫旅行异常: {str(exc)[:50]}")
+            self._say(f"   派猫猫旅行异常: {mask_text(exc, 60)}")
 
     def t_redeem(self, streak_days: int | None = None) -> None:
         for tier, need, label in (("7d", 7, "入门"), ("14d", 14, "进阶"), ("28d", 28, "巅峰")):
@@ -672,7 +691,7 @@ class WorkBuddyTaskRunner:
             _, rr = self._req("POST", "/v2/activity/growth/makeup-cards/use", {"target_date": missed})
             self._say(f"   补签{missed}: {'成功，连签保住' if isinstance(rr, dict) and rr.get('code') == 0 else str((rr or {}).get('msg', ''))[:40]}")
         except Exception as exc:  # noqa: BLE001
-            self._say(f"   补签检查异常: {str(exc)[:50]}")
+            self._say(f"   补签检查异常: {mask_text(exc, 60)}")
 
     def t_gift(self) -> None:
         for path, name in (("/billing/meter/claim-gift", "新手礼包"),
@@ -755,7 +774,7 @@ class WorkBuddyTaskRunner:
                 fn()
             except Exception as exc:  # noqa: BLE001
                 self.failed.append(name)
-                self._say(f"   [{name}] 执行异常: {str(exc)[:80]}")
+                self._say(f"   [{name}] 执行异常: {mask_text(exc, 80)}")
 
         # 领奖：所有已完成的都领一遍
         self._say("   ── 领奖 ──")
@@ -767,8 +786,9 @@ class WorkBuddyTaskRunner:
                     try:
                         self.claim(code)
                         claimed += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001 - 领奖失败也算这轮没跑完
+                        self.failed.append(f"claim:{code}")
+                        self._say(f"   [claim:{code}] 领奖异常: {mask_text(exc, 80)}")
                 self._sleep(0.8)
         if not claimed:
             self._say("   无待领奖励")
@@ -783,8 +803,17 @@ class WorkBuddyTaskRunner:
         self._say(f"完成 {done}/{total} 项" + (f"；剩余：{', '.join(self.rest)}" if self.rest else "；全部完成"))
         if manual:
             self._say(f"其中需在本机 WorkBuddy 客户端手动完成：{', '.join(manual)}")
+        # 以前这里无条件 ok=True：token 失效 / 接口挂掉时 self.failed 攒了一串、
+        # total 还是 0，界面却显示"完成"，scheduler 顺手把 last_task_day 占掉并清空 last_error，
+        # 当天就再也不会补跑了。
+        ok = not self.failed and self.tasks_error is None
+        message = f"成长任务完成 {done}/{total}" + (f"，剩余 {len(self.rest)} 项" if self.rest else "")
+        if self.failed:
+            message += f"，{len(self.failed)} 项失败（{', '.join(self.failed[:5])}）"
+        if self.tasks_error:
+            message += f"；任务列表拉取失败：{self.tasks_error}"
         return {
-            "ok": True,
+            "ok": ok,
             "provider": "workbuddy",
             "done": done,
             "total": total,
@@ -792,7 +821,7 @@ class WorkBuddyTaskRunner:
             "manual": manual,
             "failed": self.failed,
             "lines": self.lines,
-            "message": f"成长任务完成 {done}/{total}" + (f"，剩余 {len(self.rest)} 项" if self.rest else ""),
+            "message": message,
         }
 
 
