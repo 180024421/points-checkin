@@ -1,6 +1,8 @@
-cryptography>=41.0.0
-pyinstaller>=6.0.0
-pystray>=0.19.5
-Pillow>=10.0.0
-playwright>=1.40.0
-pywebview>=5.0.0
+# 上界：这些库的大版本升级会改 API/打包行为，历史上出过「本机好好的，换台机器构建就崩」。
+# 需要新版本时，先在构建机上验证再放宽对应行。
+cryptography>=41.0.0,<50.0.0
+pyinstaller>=6.0.0,<7.0.0
+pystray>=0.19.5,<0.20.0
+Pillow>=10.0.0,<13.0.0
+playwright>=1.40.0,<2.0.0
+pywebview>=5.0.0,<7.0.0

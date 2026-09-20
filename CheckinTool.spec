@@ -16,7 +16,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # pywebview 的 guilib 会 try-import 各后端（含 PyQt5.QtWebEngineWidgets），
+    # 打包机装了 PyQt5 就会被整族收进 EXE（十几 MB 死重）。Windows 上实际跑的是
+    # EdgeChromium，把这些显式排掉，同时把后端锁死在系统 WebView2。
+    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
