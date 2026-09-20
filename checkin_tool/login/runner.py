@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .. import account_store, credential_store
+from ..redact import mask_text
 from . import traework as tw_login
 from . import workbuddy as wb_login
 from .types import LoginResult
@@ -26,6 +27,10 @@ def login_credential(cred: dict[str, Any], *, headed: bool = True, log: LogFn | 
         result = tw_login.login(username, password, headed=headed)
     else:
         result = LoginResult(ok=False, provider=provider or "unknown", message="未知 provider")
+
+    # 登录失败消息可能带回调 URL / 响应片段，落盘前先兜底脱敏
+    if not result.ok:
+        result.message = mask_text(result.message, 200)
 
     linked_id = None
     if result.ok and result.token_blob:

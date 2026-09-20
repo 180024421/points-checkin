@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .license_client import data_root
+from .redact import mask_text
 from .secure_storage import load_json, save_json
-from .license_client import check_status # Import check_status
-from .license_client import device_fingerprint # Import device_fingerprint
-from .run_jane_api import report_license_usage # Import report_license_usage
-from . import server_client # Import server_client
+from . import server_client  # 代跑账号 / 签到记录 / 代挂权益
 
 ACCOUNTS_FILE = data_root() / "accounts.json"
 RUN_LOG_FILE = data_root() / "run_log.json"
@@ -31,33 +31,169 @@ DEFAULT_CREDIT_HISTORY_LIMIT = 200
 # 锁保证 read-modify-write 不丢数据（例如两个账号同时入库）。
 _IO_LOCK = threading.RLock()
 
+# 服务端代跑账号列表的进程内缓存：load_accounts() 被调用得非常频繁
+# （每次入库、每块看板渲染都会调），每次都打一次 HTTP 会把 _IO_LOCK 占住。
+_SERVER_TTL_SEC = 15.0
+_server_cache: tuple[float, list[dict[str, Any]]] | None = None
+_server_cache_lock = threading.Lock()
+
+# 服务器聚合签到数据同样每块看板都要读一次，Tk 主线程 15 秒刷一次，
+# 不打缓存会让界面在网络差的时候直接卡住。
+_AGG_TTL_SEC = 15.0
+_agg_cache: tuple[float, list[dict[str, Any]]] | None = None
+_agg_cache_lock = threading.Lock()
+
+# 代挂额度 / 联系邮箱绑定状态。更新频率极低，但界面每次刷新都要读，
+# 而且额度校验发生在入库路径上，所以必须走缓存、且 HTTP 不能落在 _IO_LOCK 里。
+_ENT_TTL_SEC = 60.0
+_ent_cache: tuple[float, dict[str, Any]] | None = None
+_ent_cache_lock = threading.Lock()
+_ent_last_error: str | None = None
+
+
+def _warn(message: str) -> None:
+    """EXE 是无控制台窗口启动的，print 看不到；告警统一进应用日志。"""
+    text = mask_text(message, 500)
+    try:
+        append_live_log(text)
+    except Exception:  # noqa: BLE001 - 日志本身不能再抛
+        pass
+    print(text)
+
+
+def invalidate_server_cache() -> None:
+    """服务器侧数据（代跑账号 / 签到记录）变化后调用，下次读取重新拉取。"""
+    global _server_cache, _agg_cache
+    with _server_cache_lock:
+        _server_cache = None
+    with _agg_cache_lock:
+        _agg_cache = None
+
+
+def invalidate_entitlement_cache() -> None:
+    global _ent_cache
+    with _ent_cache_lock:
+        _ent_cache = None
+
+
+def refresh_entitlement(*, force: bool = False) -> dict[str, Any]:
+    """拉取代挂权益（额度 + 邮箱绑定状态），带 TTL 缓存。
+
+    必须在 ``_IO_LOCK`` 之外调用：里面是 HTTP 请求。失败时返回上次结果或 ``{}``，
+    调用方按「未知」处理，不因为网络抖动阻断用户。
+    """
+    global _ent_cache, _ent_last_error
+    now = time.monotonic()
+    if not force:
+        with _ent_cache_lock:
+            if _ent_cache is not None and now - _ent_cache[0] < _ENT_TTL_SEC:
+                return dict(_ent_cache[1])
+    message = ""
+    try:
+        resp = server_client.entitlement_info()
+        if resp.get("ok"):
+            data = dict(resp.get("data") or {})
+            with _ent_cache_lock:
+                _ent_cache = (now, data)
+            _ent_last_error = None
+            return data
+        message = str(resp.get("message") or "未知错误")
+    except Exception as exc:  # noqa: BLE001 - 服务端不可达时退回缓存
+        message = str(exc)
+    # 失败也推进时间戳，否则断网时每次读都会重打一次 HTTP
+    with _ent_cache_lock:
+        _ent_cache = (now, dict(_ent_cache[1]) if _ent_cache else {})
+        stale = dict(_ent_cache[1])
+    if message != _ent_last_error:
+        _ent_last_error = message
+        _warn(f"获取代挂额度失败：{message}")
+    return stale
+
+
+def get_entitlement() -> dict[str, Any]:
+    """只读缓存，不发请求（供持锁路径调用）。"""
+    with _ent_cache_lock:
+        return dict(_ent_cache[1]) if _ent_cache else {}
+
+
+def contact_binding() -> dict[str, Any]:
+    """联系邮箱绑定状态：{verified, email}。verified=None 表示未知（离线/未取到）。"""
+    ent = get_entitlement()
+    return {"verified": ent.get("contactVerified"), "email": ent.get("contactEmail") or ""}
+
+
+def contact_gate(*, force: bool = True) -> str | None:
+    """代跑前置校验：服务端要求先绑定并验证联系邮箱。
+
+    返回 None 表示放行，返回字符串表示阻断原因。服务端不可达时 verified 为 None，
+    同样放行 —— 额度与绑定最终由服务端裁决，本机不该因为网络抖动把用户挡在门外。
+    """
+    refresh_entitlement(force=force)
+    if contact_binding().get("verified") is False:
+        return "服务器代跑前请先绑定联系邮箱（账号签到异常时通知你）"
+    return None
+
+
+def _aggregated_runs_cached() -> list[dict[str, Any]]:
+    global _agg_cache
+    now = time.monotonic()
+    with _agg_cache_lock:
+        if _agg_cache is not None and now - _agg_cache[0] < _AGG_TTL_SEC:
+            return list(_agg_cache[1])
+    try:
+        rows = server_client.fetch_aggregated_checkin_data()
+    except Exception as exc:  # noqa: BLE001 - 服务器不可达时退回上次结果
+        _warn(f"获取服务器签到聚合数据失败：{exc}")
+        with _agg_cache_lock:
+            return list(_agg_cache[1]) if _agg_cache else []
+    with _agg_cache_lock:
+        _agg_cache = (now, list(rows))
+    return list(rows)
+
+
+def _server_accounts_cached() -> list[dict[str, Any]]:
+    global _server_cache
+    now = time.monotonic()
+    with _server_cache_lock:
+        if _server_cache is not None and now - _server_cache[0] < _SERVER_TTL_SEC:
+            return list(_server_cache[1])
+    try:
+        rows = server_client.list_server_accounts()
+    except Exception as exc:  # noqa: BLE001 - 服务器不可达时用上次结果兜底
+        _warn(f"获取服务器代跑账号失败：{exc}")
+        with _server_cache_lock:
+            return list(_server_cache[1]) if _server_cache else []
+    with _server_cache_lock:
+        _server_cache = (now, list(rows))
+    return list(rows)
+
 
 def _enabled_count(rows: list[dict[str, Any]]) -> int:
     return sum(1 for r in rows if r.get("enabled", True))
-
-def _report_enabled_accounts_to_run_jane(accounts: list[dict[str, Any]]) -> None:
-    enabled_now = _enabled_count(accounts)
-    fp = device_fingerprint()
-    if not fp:
-        print("Warning: device fingerprint not available, cannot report usage.")
-        return
-    try:
-        report_license_usage(fp, enabled_now)
-        print(f"Reported {enabled_now} enabled accounts to run-jane.")
-    except Exception as e:
-        print(f"Error reporting enabled accounts to run-jane: {e}")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def get_account_limit() -> int | None:
-    """可代挂账号数上限（按账号数计费）。
+    """可挂载账号数上限。
 
-    直接读授权缓存（由 license_client.check_status 写入，离线可用）；
-    不再用空 settings 发起请求（旧实现传 {}，会走默认服务地址导致判断失真）。
-    None = 不限（未取到额度时不阻断用户）。
+    以服务端代挂权益（``/entitlement/info`` 的 ``quota``，对应
+    ``checkin_entitlement.account_quota``，按卡密/卡种配置）为准；这里只读缓存，
+    取不到时才退回授权缓存里的 ``accountLimit`` 作离线兜底。
+
+    注意 ``accountLimit`` 在服务端是按「设备座位数」校验的，和代挂额度语义不同，
+    所以它只能当兜底值：服务端一旦可达就以 quota 为准。None = 不限。
     """
+    quota = get_entitlement().get("quota")
+    if quota is not None:
+        try:
+            quota = int(quota)
+        except (TypeError, ValueError) as e:
+            _warn(f"代挂额度不是数字：{quota}（{e}）")
+        else:
+            if quota > 0:
+                return quota
     try:
         from .license_client import load_cache
 
@@ -68,49 +204,52 @@ def get_account_limit() -> int | None:
             limit = int(limit)
         except ValueError as e:
             # Log the error for debugging, but still return None as per original logic
-            print(f"Error converting accountLimit to int: {limit}, {e}")
+            _warn(f"accountLimit 不是数字：{limit}（{e}）")
             return None
         return limit if limit > 0 else None
-    except Exception as e:
-        # Log unexpected errors
-        print(f"Unexpected error in get_account_limit: {e}")
+    except Exception as e:  # noqa: BLE001
+        _warn(f"读取账号上限失败：{e}")
         return None
 
 
-def get_account_usage() -> dict[str, Any]:
-    """供界面展示：{limit, used, remain, planLabel, expireAt}。"""
+def get_account_usage(*, accounts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """供界面展示：{limit, used, remain, planLabel, expireAt, contactVerified, contactEmail}。
+
+    会先刷一次代挂权益（HTTP 在此处、锁外发起），保证界面显示的是服务端额度。
+    ``used`` 取本机「启用中的账号数」——这才是本地额度校验的口径；服务端 ``used``
+    只统计它那边的代挂记录（不含纯本机账号），拿来显示会和拦截提示自相矛盾。
+
+    ``accounts`` 让调用方把已经算好的合并视图传进来，一次界面刷新不必合并三遍。
+    """
+    refresh_entitlement()
     limit = get_account_limit()
     used = 0
     plan_label = ""
     expire_at = None
+    ent = get_entitlement()
     try:
         from .license_client import load_cache
 
         cache = load_cache()
         plan_label = str(cache.get("accountPlanLabel") or cache.get("planLabel") or "")
-        expire_at = cache.get("expireAt")
-        raw_used = cache.get("accountUsed")
-        if raw_used is not None:
-            try:
-                used = int(raw_used)
-            except ValueError as e:
-                print(f"Error converting accountUsed to int: {raw_used}, {e}")
-                # Keep used as 0 as per original logic if conversion fails
-    except Exception as e:
-        print(f"Unexpected error loading license cache in get_account_usage: {e}")
-    
-    if used <= 0:
-        try:
-            used = sum(1 for a in load_accounts() if a.get("enabled", True))
-        except Exception as e:
-            print(f"Error calculating account usage from loaded accounts: {e}")
-            used = 0
+        expire_at = ent.get("expireAt") or cache.get("expireAt")
+    except Exception as e:  # noqa: BLE001
+        _warn(f"读取授权缓存中的账号用量失败：{e}")
+
+    try:
+        rows = load_accounts() if accounts is None else accounts
+        used = sum(1 for a in rows if a.get("enabled", True))
+    except Exception as e:  # noqa: BLE001
+        _warn(f"统计已用账号数失败：{e}")
+        used = 0
     return {
         "limit": limit,
         "used": used,
         "remain": None if limit is None else max(limit - used, 0),
         "planLabel": plan_label,
         "expireAt": expire_at,
+        "contactVerified": ent.get("contactVerified"),
+        "contactEmail": ent.get("contactEmail") or "",
     }
 
 
@@ -119,26 +258,123 @@ def _today_local() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def load_accounts() -> list[dict[str, Any]]:
-    with _IO_LOCK:
-        local_accounts_data = load_json(ACCOUNTS_FILE, {"accounts": []})
-        local_accounts = local_accounts_data.get("accounts", [])
+def _merge_rows(local_accounts: list[dict[str, Any]], server_accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """本地账号 + 服务器代跑记录的合并视图（每个账号只出现一行，本机 id 为准）。
 
-        server_accounts = server_client.list_server_accounts() # 从服务端获取代跑账户
+    旧实现是按 id 直接覆盖：服务器记录（自增整数 id）和本机记录（uuid）是两条，
+    于是同一个代挂账号在列表里出现两次，而且服务器整行会被写进 accounts.json，
+    服务端删号后就留下幽灵行。这里按 ``clientAccountId`` → provider+identity 对回
+    同一条，只把服务端的运行状态覆盖进来；对不上的（例如别机上传的）单独列一行，
+    并打上 ``source=server``，由 ``save_accounts`` 挡在本地文件之外。
+    """
+    server_ids = {str(r.get("server_account_id") or r.get("id") or "") for r in server_accounts}
+    server_ids.discard("")
+    rows = _drop_server_sourced(
+        [r for r in local_accounts if str(r.get("id") or "") not in server_ids]
+    )
+    out: list[dict[str, Any]] = list(rows)
+    by_client_id = {str(r.get("id")): r for r in out}
+    by_identity = {}
+    for row in out:
+        key = account_identity_key(row)
+        if key.split(":", 1)[-1]:
+            by_identity.setdefault(key, row)
+    for srv in server_accounts:
+        twin = by_client_id.get(str(srv.get("client_account_id") or "")) or by_identity.get(account_identity_key(srv))
+        if twin is None:
+            orphan = dict(srv)
+            orphan["id"] = f"srv:{srv.get('server_account_id') or srv.get('id')}"
+            orphan["source"] = "server"  # 不依赖上游打标：合并视图里的纯服务器行一律不落盘
+            orphan["run_mode"] = "server"
+            out.append(orphan)
+            continue
+        for key in ("enabled", "last_ok_at", "last_error"):
+            if srv.get(key) is not None:
+                twin[key] = srv[key]
+        twin["run_mode"] = "server"  # 服务器确实在代跑这个账号
+        twin["server_account_id"] = srv.get("server_account_id") or srv.get("id")
+        if not twin.get("label") and srv.get("label"):
+            twin["label"] = srv["label"]
+    return out
 
-        # 合并账户，以服务端账户为准
-        all_accounts_map: dict[str, dict[str, Any]] = {}
-        for acc in local_accounts:
-            all_accounts_map[str(acc.get("id"))] = acc
-        for acc in server_accounts:
-            all_accounts_map[str(acc.get("id"))] = acc
-        
-        return list(all_accounts_map.values())
 
+_purged_server_rows = 0
+
+# 本机账号 id 一律是 uuid4（见 upsert_account），而 checkin_bound_account.id 是服务端自增整数。
+# 因此「纯数字 id + run_mode=server」只可能是旧版本误落盘的代跑记录。
+_SERVER_GHOST_ID_RE = re.compile(r"^\d+$")
+
+
+def _is_server_sourced(row: dict[str, Any]) -> bool:
+    if row.get("source") == "server":
+        return True
+    return bool(_SERVER_GHOST_ID_RE.match(str(row.get("id") or ""))) and str(row.get("run_mode") or "") == "server"
+
+
+def _drop_server_sourced(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """剔除历史版本误写进 accounts.json 的服务器代跑记录（本机不产生这类行）。"""
+    global _purged_server_rows
+    kept, purged = [], 0
+    for row in rows:
+        if _is_server_sourced(row):
+            purged += 1
+        else:
+            kept.append(row)
+    if purged:
+        _purged_server_rows += purged
+        _warn(f"清理了 {purged} 条被误存进本机的服务器代跑记录（累计 {_purged_server_rows} 条），下次保存不再写回")
+    return kept
 
 
 def save_accounts(accounts: list[dict[str, Any]]) -> None:
-    save_json(ACCOUNTS_FILE, {"accounts": accounts, "updatedAt": _now()})
+    """公开写入口：写本地账号文件，自己持锁（调度器/界面都在锁外直接调用）。
+
+    服务器代跑记录（``source=server``，或旧版本误落盘的服务端自增 id）不落盘，
+    否则服务端删号后本机永远留着一条幽灵账号。
+    """
+    with _IO_LOCK:
+        rows = [r for r in accounts if not _is_server_sourced(r)]
+        save_json(ACCOUNTS_FILE, {"accounts": rows, "updatedAt": _now()})
+
+
+def _load_local_accounts() -> list[dict[str, Any]]:
+    with _IO_LOCK:
+        data = load_json(ACCOUNTS_FILE, {"accounts": []})
+        return list(data.get("accounts") or [])
+
+
+def load_accounts(*, include_server: bool = True) -> list[dict[str, Any]]:
+    """本地账号 +（默认）服务器代跑账号合并视图。
+
+    网络请求放在 `_IO_LOCK` 之外，且带 TTL 缓存：以前每次读账号都在持锁状态下
+    打一次 HTTP，入库 N 个账号 = 卡 N 次往返，调度线程与 UI 会互相阻塞。
+    """
+    local_accounts = _load_local_accounts()
+    if not include_server:
+        return local_accounts
+    return _merge_rows(local_accounts, _server_accounts_cached())
+
+
+def update_account(account_id: str, mutate: Callable[[dict[str, Any]], dict[str, Any] | None]) -> bool:
+    """在同一把 ``_IO_LOCK`` 里读-改-写一行本地账号，命中并改动返回 True。
+
+    以前各处写法是 ``load_accounts()`` → 改一行 → ``save_accounts()`` 整表覆盖：
+    读和写之间锁已经放开，自动同步写 ``last_credits`` 与签到写 ``token_blob`` 一交错，
+    后写者就会拿旧快照把对方刚续期好的 token 覆盖回去。HTTP 依旧留在锁外，
+    这里只读本地文件。``mutate`` 收到当前行，返回要合并的字段（None/空 = 不改）。
+    """
+    with _IO_LOCK:
+        rows = _load_local_accounts()
+        for row in rows:
+            if str(row.get("id")) != str(account_id):
+                continue
+            patch = mutate(row)
+            if not isinstance(patch, dict) or not patch:
+                return False
+            row.update(patch)
+            save_accounts(rows)
+            return True
+        return False
 
 
 def account_identity_key(account: dict[str, Any]) -> str:
@@ -157,12 +393,16 @@ def account_identity_key(account: dict[str, Any]) -> str:
 
 
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
+    # 合并视图和代挂额度都要打 HTTP，必须在锁外先取好；
+    # 持锁期间只做本地文件的读写，否则一次入库会把所有界面/调度线程一起挂住。
+    server_rows = _server_accounts_cached()
+    refresh_entitlement()
     with _IO_LOCK:
-        return _upsert_account(account)
+        return _upsert_account(account, server_rows)
 
 
-def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
-    accounts = load_accounts()
+def _upsert_account(account: dict[str, Any], server_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    accounts = _merge_rows(_load_local_accounts(), server_rows or [])
     identity = account_identity_key(account)
     account["identity"] = identity.split(":", 1)[-1] if ":" in identity else identity
     account["updatedAt"] = _now()
@@ -191,9 +431,6 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
         account_id = str(uuid.uuid4())
     account["id"] = account_id
 
-    def _enabled_count(rows: list[dict[str, Any]]) -> int:
-        return sum(1 for r in rows if r.get("enabled", True))
-
     account_limit = get_account_limit()
     if idx >= 0:
         was_enabled = bool(accounts[idx].get("enabled", True))
@@ -209,7 +446,8 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
                     f"当前套餐仅支持 {account_limit} 个（升级套餐可增加）"
                 )
     else:
-        if account_limit is not None:
+        # 停用账号不占额度（额度按「启用中的账号数」计），否则额度满时连备份都存不进
+        if account_limit is not None and bool(account.get("enabled", True)):
             enabled_now = _enabled_count(accounts)
             if enabled_now >= account_limit:
                 raise ValueError(
@@ -230,30 +468,104 @@ def _upsert_account(account: dict[str, Any]) -> dict[str, Any]:
             account["tags"].append(user_tag_from_blob)
     
     save_accounts(accounts)
-    _report_enabled_accounts_to_run_jane(accounts) # Report changes to run-jane
     return account
 
 
 def delete_account(account_id: str) -> bool:
+    server_rows = _server_accounts_cached()  # 锁外取，避免持锁打 HTTP
     with _IO_LOCK:
-        accounts = load_accounts()
+        accounts = _merge_rows(_load_local_accounts(), server_rows)
         new_rows = [a for a in accounts if str(a.get("id")) != account_id]
         if len(new_rows) == len(accounts):
             return False
         save_accounts(new_rows)
-        _report_enabled_accounts_to_run_jane(new_rows) # Report changes to run-jane
-        return True
+    return True
+
+
+def delete_account_with_server(
+    account_id: str, *, log: Callable[[str], None] | None = None
+) -> dict[str, Any]:
+    """删账号：本地行 + 它在服务器上的代跑记录一起删。
+
+    只删本地会留下幽灵：服务器记录还在代跑，下一次合并视图又会以 ``srv:<id>`` 冒出来。
+    服务端自增 id 从 ``server_account_id`` 取，拿本机 uuid 去删只会误报。
+    """
+    row = next(
+        (r for r in load_accounts() if str(r.get("id")) == str(account_id)), None
+    )
+    if row is None:
+        return {"ok": False, "message": "未找到账号"}
+
+    server_id = row.get("server_account_id") or (
+        str(account_id).removeprefix("srv:")
+        if str(account_id).startswith("srv:")
+        else ""
+    )
+    delegates = row.get("source") == "server" or str(row.get("run_mode") or "") == "server"
+
+    if row.get("source") != "server" and not delete_account(str(account_id)):
+        return {"ok": False, "message": "删除本地账号失败"}
+    if not delegates:
+        return {"ok": True, "message": "已删除"}
+    if not server_id:
+        message = "本地记录已删除，但该账号没有服务器代跑记录 id，服务端可能仍在代跑"
+        if log:
+            log(message)
+        return {"ok": True, "message": message}
+    try:
+        result = server_client.delete_server_account(server_id)
+    except Exception as exc:  # noqa: BLE001 - 服务端异常不能让本地删除回滚
+        if log:
+            log(f"调用服务器删除接口异常: {exc}")
+        return {"ok": False, "message": f"本地记录已删除，但调用服务器删除接口异常: {exc}"}
+    if not result.get("ok"):
+        reason = result.get("message") or "未知错误"
+        if log:
+            log(f"删除服务器代跑记录 {server_id} 失败: {reason}")
+        return {"ok": False, "message": f"本地记录已删除，但删除服务器代跑记录失败: {reason}"}
+    if log:
+        log(f"服务器代跑记录 {server_id} 已删除。")
+    return {"ok": True, "message": "已删除（含服务器代跑记录）"}
+
+
+def set_run_mode(account_id: str, mode: str) -> dict[str, Any]:
+    """切换本机/代跑模式（两套界面共用，避免出现两种语义）。
+
+    注意：改回 local 只是本机不再跑，服务器上的代跑记录仍在——不删就会继续代跑，
+    这里必须如实告知，不能让界面显示「已设为 local」却还在被服务器跑。
+    """
+    mode = str(mode or "").strip()
+    if mode not in ("local", "server"):
+        return {"ok": False, "message": "模式只能是 local 或 server"}
+    merged = load_accounts()
+    row = next((r for r in merged if str(r.get("id")) == str(account_id)), None)
+    if row is None:
+        return {"ok": False, "message": "未找到账号"}
+    if row.get("source") == "server":
+        # 只在服务器存在的记录（别机上传的）：本机没有对应行，改模式改不到它身上
+        return {"ok": False, "message": "这条记录只存在于服务器，请直接删除以停止代跑"}
+    # ``server_account_id`` 是合并视图从服务器记录里带进来的，本地行上没有；
+    # 只写要改的那个字段，别把整行视图塞回 accounts.json（那会把服务端的 last_error 等存成历史）
+    if not update_account(str(account_id), lambda _row: {"run_mode": mode}):
+        return {"ok": False, "message": "未找到账号"}
+    if mode == "local" and row.get("server_account_id"):
+        return {"ok": True, "message": "已改回本机签到；服务器代跑记录仍在，要停止请删除该账号"}
+    return {"ok": True, "message": f"已设为 {mode}"}
 
 
 def public_account_view(account: dict[str, Any], today_map: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
-    today = (today_map or {}).get(str(account.get("id")), {})
+    today_map = today_map or {}
+    # 代挂账号的跑批记录可能按服务端 id 回传，两种 id 都查一次
+    today = today_map.get(str(account.get("id"))) or today_map.get(str(account.get("server_account_id") or "")) or {}
     expires_at = blob.get("expires_at") or blob.get("expiresAt")
     expired = False
     if isinstance(expires_at, (int, float)) and expires_at > 0:
         expired = expires_at < (datetime.now().timestamp() * 1000 + 5 * 60 * 1000)
     return {
         "id": account.get("id"),
+        "server_account_id": account.get("server_account_id"),
+        "source": account.get("source") or "local",
         "provider": account.get("provider"),
         "label": account.get("label") or blob.get("nickname") or blob.get("user_id") or blob.get("uid") or account.get("id"),
         "run_mode": account.get("run_mode") or "local",
@@ -262,7 +574,7 @@ def public_account_view(account: dict[str, Any], today_map: dict[str, dict[str, 
         "last_error": account.get("last_error"),
         "last_credits": account.get("last_credits"),
         "last_streak": account.get("last_streak"),
-        "token_hint": blob.get("token_hint") or "(已保存)",
+        "token_hint": blob.get("token_hint") or ("(仅服务器)" if not blob and account.get("source") == "server" else "(已保存)"),
         "token_expired": expired,
         "today_status": today.get("status") or "未跑",
         "today_credits": today.get("credits"),
@@ -300,26 +612,70 @@ def clear_run_logs() -> None:
     save_json(RUN_LOG_FILE, {"runs": [], "clearedAt": _now()})
 
 
-def append_live_log(message: str) -> None:
-    with _IO_LOCK:
+# 实时日志是热路径：跑批时一秒能写十几条，而文件是整份 DPAPI 加密的 JSON，
+# 每写一行都「解密 800 行 + 重加密 + 落盘」会把 _IO_LOCK 变成界面瓶颈。
+# 写走内存环形缓冲，最多 LIVE_FLUSH_SEC 秒落盘一次；退出时调 flush_live_logs()。
+LIVE_FLUSH_SEC = 2.0
+_live_buf: list[dict[str, Any]] | None = None
+_live_dirty = False
+_live_flushed_at = 0.0
+
+
+def _live_lines_locked() -> list[dict[str, Any]]:
+    """取内存缓冲，首次调用时从盘上加载。调用方必须持 ``_IO_LOCK``。"""
+    global _live_buf
+    if _live_buf is None:
         data = load_json(LIVE_LOG_FILE, {"lines": []})
         lines = data.get("lines") if isinstance(data, dict) else []
-        if not isinstance(lines, list):
-            lines = []
-        lines.insert(0, {"at": datetime.now().strftime("%H:%M:%S"), "message": message})
-        lines = lines[:MAX_LIVE_LOGS]
-        save_json(LIVE_LOG_FILE, {"lines": lines})
+        _live_buf = lines if isinstance(lines, list) else []
+    return _live_buf
+
+
+def _flush_live_locked() -> None:
+    global _live_dirty, _live_flushed_at
+    if not _live_dirty:
+        return
+    save_json(LIVE_LOG_FILE, {"lines": _live_lines_locked()[:MAX_LIVE_LOGS]})
+    _live_dirty = False
+    _live_flushed_at = time.monotonic()
+
+
+def _flush_if_due_locked() -> None:
+    """到一个落盘周期才真的写盘。读写两条路都调它：只有写入触发落盘的话，
+    一小段集中打完的日志尾巴会一直卡在内存里，直到进程退出才下去。"""
+    if time.monotonic() - _live_flushed_at >= LIVE_FLUSH_SEC:
+        _flush_live_locked()
+
+
+def flush_live_logs() -> None:
+    """把内存里未落盘的日志写下去（退出前调，缓冲区最多丢 LIVE_FLUSH_SEC 秒）。"""
+    with _IO_LOCK:
+        _flush_live_locked()
+
+
+def append_live_log(message: str) -> None:
+    global _live_dirty
+    with _IO_LOCK:
+        lines = _live_lines_locked()
+        lines.insert(0, {"at": datetime.now().isoformat(timespec="seconds"), "message": message})
+        del lines[MAX_LIVE_LOGS:]
+        _live_dirty = True
+        _flush_if_due_locked()
 
 
 def load_live_logs(limit: int = DEFAULT_LIVE_LOGS_LIMIT) -> list[dict[str, Any]]:
     with _IO_LOCK:
-        data = load_json(LIVE_LOG_FILE, {"lines": []})
-        lines = data.get("lines", [])
-        return lines[:limit]
+        snapshot = list(_live_lines_locked()[:limit])
+        _flush_if_due_locked()
+        return snapshot
 
 
 def clear_live_logs() -> None:
-    save_json(LIVE_LOG_FILE, {"lines": [], "clearedAt": _now()})
+    global _live_buf, _live_dirty
+    with _IO_LOCK:
+        _live_buf = []
+        _live_dirty = False
+        save_json(LIVE_LOG_FILE, {"lines": [], "clearedAt": _now()})
 
 
 def append_credit_history(entry: dict[str, Any]) -> None:
@@ -365,18 +721,19 @@ def today_run_map() -> dict[str, dict[str, Any]]:
         out[aid] = _process_run_log_entry(row)
     
     # 加载服务器端运行日志并合并，服务器端数据优先
-    server_runs = server_client.fetch_aggregated_checkin_data()
-    for row in server_runs:
+    for row in _aggregated_runs_cached():
         row_day = str(row.get("day") or "")
         if not row_day:
             at = str(row.get("at") or "")
             row_day = at[:10] if len(at) >= 10 else ""
         if row_day != day:
             continue
-        aid = str(row.get("account_id") or "")
-        if not aid:
-            continue
-        out[aid] = _process_run_log_entry(row) # 服务器数据覆盖本地数据
+        # 服务器按它自己的 bound_account_id 回填，同时认 clientAccountId（= 本机 uuid），
+        # 否则代挂账号的跑批记录挂不到本机这一行上
+        keys = [str(row.get(k) or "") for k in ("account_id", "clientAccountId", "client_account_id")]
+        entry = _process_run_log_entry(row)
+        for key in {k for k in keys if k}:
+            out[key] = entry
 
     return out
 
@@ -400,16 +757,22 @@ def _process_run_log_entry(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def today_board() -> dict[str, Any]:
-    accounts = load_accounts()
-    today = today_run_map()
+def today_board(
+    *,
+    accounts: list[dict[str, Any]] | None = None,
+    today: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """今日看板。``accounts`` / ``today`` 可由调用方传入已算好的结果，
+    界面一次刷新只合并一次账号和跑批记录。"""
+    rows = load_accounts() if accounts is None else accounts
+    run_map = today_run_map() if today is None else today
     done: list[dict[str, Any]] = []
     pending: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
-    for acc in accounts:
+    for acc in rows:
         if not acc.get("enabled", True):
             continue
-        view = public_account_view(acc, today)
+        view = public_account_view(acc, run_map)
         st = view.get("today_status") or "未跑"
         if st.startswith("已"):
             done.append(view)

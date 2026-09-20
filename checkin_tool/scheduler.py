@@ -12,6 +12,7 @@ from typing import Any, Callable
 from . import account_store, server_client
 from .adapters import traework, workbuddy, workbuddy_tasks
 from .license_client import ensure_licensed
+from .redact import mask_text
 from .settings import load_settings
 
 # 代跑凭证保鲜间隔：服务端不会自己续期，本机定期把刷新后的 token 回传
@@ -21,27 +22,58 @@ LogFn = Callable[[str], None]
 
 
 def _log(fn: LogFn | None, msg: str) -> None:
-    account_store.append_live_log(msg)
+    """一条日志只落一次盘。
+
+    两个界面的日志出口（``gui.append_log`` / ``CheckinApi._append_log``）自己就写
+    实时日志，这里再写一遍会把每条调度日志存成双份，实时日志的有效容量直接减半。
+    没有 sink 时才由这里兜底落盘。
+    """
     if fn:
         fn(msg)
+    else:
+        account_store.append_live_log(msg)
+
+
+
+# 积分查询/状态同步的全局串行槽：自动同步、手动「立即同步」、「刷新积分」三条路
+# 都会逐个账号去问供应商，同名任务之外的互斥只能靠这把锁，否则同一个 token
+# 会被并发拿去查两次（限流、风控，还会互相覆盖回写）。
+_CREDIT_SLOT_LOCK = threading.Lock()
+_CREDIT_SLOT_BUSY = False
+
+
+def try_acquire_credit_slot() -> bool:
+    global _CREDIT_SLOT_BUSY
+    with _CREDIT_SLOT_LOCK:
+        if _CREDIT_SLOT_BUSY:
+            return False
+        _CREDIT_SLOT_BUSY = True
+        return True
+
+
+def release_credit_slot() -> None:
+    global _CREDIT_SLOT_BUSY
+    with _CREDIT_SLOT_LOCK:
+        _CREDIT_SLOT_BUSY = False
+
+
+def credit_slot_busy() -> bool:
+    with _CREDIT_SLOT_LOCK:
+        return _CREDIT_SLOT_BUSY
 
 
 def _update_account_after_run(account_id: str, result: Any) -> None:
-    accounts = account_store.load_accounts()
-    for row in accounts:
-        if str(row.get("id")) != str(account_id):
-            continue
+    def patch(row: dict[str, Any]) -> dict[str, Any]:
         if result.ok:
-            row["last_ok_at"] = datetime.now().isoformat(timespec="seconds")
-            row["last_error"] = ""
+            out: dict[str, Any] = {"last_ok_at": datetime.now().isoformat(timespec="seconds"), "last_error": ""}
             if result.credits is not None:
-                row["last_credits"] = result.credits
+                out["last_credits"] = result.credits
             if result.streak is not None:
-                row["last_streak"] = result.streak
-        else:
-            row["last_error"] = result.message
-        break
-    account_store.save_accounts(accounts)
+                out["last_streak"] = result.streak
+            return out
+        return {"last_error": result.message}
+
+    account_store.update_account(account_id, patch)
     account_store.append_credit_history(
         {
             "account_id": account_id,
@@ -71,14 +103,12 @@ def run_one_account(account: dict[str, Any], *, log: LogFn | None = None) -> dic
         if renew_note and new_blob is not blob:
             blob = new_blob
             account["token_blob"] = new_blob
-            accounts = account_store.load_accounts()
-            for row in accounts:
-                if str(row.get("id")) == str(account.get("id")):
-                    row["token_blob"] = new_blob
-                    cur = (row.get("last_error") or "").strip()
-                    row["last_error"] = (cur + " | " + renew_note).strip(" |") if cur else renew_note
-                    break
-            account_store.save_accounts(accounts)
+
+            def patch(row: dict[str, Any]) -> dict[str, Any]:
+                cur = (row.get("last_error") or "").strip()
+                return {"token_blob": new_blob, "last_error": (cur + " | " + renew_note).strip(" |") if cur else renew_note}
+
+            account_store.update_account(str(account.get("id")), patch)
         result = traework.checkin_from_blob(blob)
     else:
         return {"ok": False, "message": f"未知 provider: {provider}"}
@@ -101,8 +131,18 @@ def run_one_account(account: dict[str, Any], *, log: LogFn | None = None) -> dic
     return payload
 
 
-def refresh_account_credits(account: dict[str, Any]) -> dict[str, Any]:
+def refresh_account_credits(
+    account: dict[str, Any], *, skip_if_unchanged: bool = False
+) -> dict[str, Any]:
+    """查询一个账号的当前积分并回写。
+
+    ``skip_if_unchanged``：自动同步用——积分没变就不往「积分记录」里堆，
+    否则 5 分钟一条会把历史刷满（上限 2000 条，两天就滚动没了）。
+    """
     provider = str(account.get("provider") or "").strip()
+    if account.get("source") == "server":
+        # 只在服务器存在的代跑记录（别机上传的）：本机没有凭证，查询和回写都没有意义
+        return {"ok": False, "message": "该记录仅存在于服务器，本机无凭证可查"}
     blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
     if provider == "workbuddy":
         info = workbuddy.query_from_blob(blob)
@@ -111,26 +151,36 @@ def refresh_account_credits(account: dict[str, Any]) -> dict[str, Any]:
     else:
         return {"ok": False, "message": "未知 provider"}
     if info.get("ok"):
-        accounts = account_store.load_accounts()
-        for row in accounts:
-            if str(row.get("id")) == str(account.get("id")):
-                credits = info.get("today_credit") if provider == "workbuddy" else info.get("credits")
-                streak = info.get("streak")
-                if credits is not None:
-                    row["last_credits"] = credits
-                if streak is not None:
-                    row["last_streak"] = streak
-                if info.get("today_checked_in"):
-                    row["last_ok_at"] = row.get("last_ok_at") or datetime.now().isoformat(timespec="seconds")
-                break
-        account_store.save_accounts(accounts)
+        credits = info.get("today_credit") if provider == "workbuddy" else info.get("credits")
+        streak = info.get("streak")
+        checked_in_today = bool(info.get("today_checked_in"))
+        changed = False
+
+        def patch(row: dict[str, Any]) -> dict[str, Any]:
+            # 和"盘上这一行"比，不是和调用方几分钟前拿到的快照比：否则 changed 会算错，
+            # 积分记录要么白记一条、要么该记的没记。
+            nonlocal changed
+            changed = credits != row.get("last_credits") or streak != row.get("last_streak")
+            out: dict[str, Any] = {}
+            if credits is not None:
+                out["last_credits"] = credits
+            if streak is not None:
+                out["last_streak"] = streak
+            if checked_in_today and not row.get("last_ok_at"):
+                out["last_ok_at"] = datetime.now().isoformat(timespec="seconds")
+            return out
+
+        account_store.update_account(str(account.get("id")), patch)
+        info = {**info, "credits": credits, "changed": changed}
+        if skip_if_unchanged and not changed:
+            return info
         account_store.append_credit_history(
             {
                 "account_id": account.get("id"),
                 "provider": provider,
                 "ok": True,
-                "credits": info.get("today_credit") if provider == "workbuddy" else info.get("credits"),
-                "streak": info.get("streak"),
+                "credits": credits,
+                "streak": streak,
                 "message": "查询积分状态",
                 "query_only": True,
             }
@@ -167,21 +217,20 @@ def run_workbuddy_tasks(
     for line in result.get("lines") or []:
         _log(log, line)
 
-    accounts = account_store.load_accounts()
-    for row in accounts:
-        if str(row.get("id")) != str(account.get("id")):
-            continue
-        row["last_task_day"] = today
-        row["last_task_at"] = datetime.now().isoformat(timespec="seconds")
+    def patch(row: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {"last_task_at": datetime.now().isoformat(timespec="seconds")}
         if result.get("ok"):
-            row["last_task_done"] = result.get("done")
-            row["last_task_total"] = result.get("total")
-            row["last_task_rest"] = result.get("rest") or []
-            row["last_error"] = ""
+            # 只有真跑成才占掉「今天已跑」：失败必须留给下一个窗口重试
+            out["last_task_day"] = today
+            out["last_task_done"] = result.get("done")
+            out["last_task_total"] = result.get("total")
+            out["last_task_rest"] = result.get("rest") or []
+            out["last_error"] = ""
         else:
-            row["last_error"] = result.get("message") or "成长任务失败"
-        break
-    account_store.save_accounts(accounts)
+            out["last_error"] = result.get("message") or "成长任务失败"
+        return out
+
+    account_store.update_account(str(account.get("id")), patch)
     account_store.append_run_log(
         {
             "account_id": account.get("id"),
@@ -211,7 +260,10 @@ def run_workbuddy_tasks_all(
             continue
         if str(account.get("provider") or "") != "workbuddy":
             continue
-        results.append(run_workbuddy_tasks(account, log=log, settings=settings, force=force))
+        try:
+            results.append(run_workbuddy_tasks(account, log=log, settings=settings, force=force))
+        except Exception as exc:  # noqa: BLE001 - 单账号异常不能带走整批任务
+            _log(log, f"[成长任务] {account.get('label') or account.get('id')} 异常: {mask_text(exc, 160)}")
         time.sleep(0.5)
     return results
 
@@ -234,17 +286,21 @@ def refresh_server_credentials(*, log: LogFn | None = None) -> list[dict[str, An
         label = account.get("label") or account.get("id")
         blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
         changed = False
-        if provider == "traework" and blob.get("refresh_token"):
-            new_blob, note = traework.prepare_checkin_blob(blob, settings=settings)
-            old_token = str(blob.get("token") or blob.get("access_token") or "")
-            new_token = str(new_blob.get("token") or new_blob.get("access_token") or "")
-            if new_token and new_token != old_token:
-                account["token_blob"] = new_blob
-                changed = True
-                _log(log, f"[代跑凭证] {label} 已刷新 token，将同步服务器")
-            elif note and "失败" in note:
-                _log(log, f"[代跑凭证] {label} 续期失败：{note}")
-        result = server_client.sync_server_blob(account, log=log)
+        try:
+            if provider == "traework" and blob.get("refresh_token"):
+                new_blob, note = traework.prepare_checkin_blob(blob, settings=settings)
+                old_token = str(blob.get("token") or blob.get("access_token") or "")
+                new_token = str(new_blob.get("token") or new_blob.get("access_token") or "")
+                if new_token and new_token != old_token:
+                    account["token_blob"] = new_blob
+                    changed = True
+                    _log(log, f"[代跑凭证] {label} 已刷新 token，将同步服务器")
+                elif note and "失败" in note:
+                    _log(log, f"[代跑凭证] {label} 续期失败：{note}")
+            result = server_client.sync_server_blob(account, log=log)
+        except Exception as exc:  # noqa: BLE001 - 一个账号的续期/上传异常不能带走整批，也不能杀调度线程
+            _log(log, f"[代跑凭证] {label} 异常: {mask_text(exc, 160)}")
+            result = {"ok": False, "message": mask_text(exc, 160)}
         results.append(
             {
                 "account_id": account.get("id"),
@@ -273,7 +329,11 @@ def run_local_all(*, require_license: bool = True, log: LogFn | None = None) -> 
         if str(account.get("run_mode") or "local") != "local":
             continue
         _log(log, f"签到 {account.get('provider')} / {account.get('label') or account.get('id')} ...")
-        result = run_one_account(account, log=log)
+        label = account.get("label") or account.get("id") or account.get("provider")
+        try:
+            result = run_one_account(account, log=log)
+        except Exception as exc:  # noqa: BLE001 - 一个账号炸了不能带走整批，更不能带走调度线程
+            result = {"ok": False, "provider": account.get("provider"), "message": f"{label} 执行异常: {mask_text(exc, 160)}"}
         results.append(result)
         _log(log, result.get("message") or str(result))
         time.sleep(0.8 + random.random())
@@ -282,7 +342,7 @@ def run_local_all(*, require_license: bool = True, log: LogFn | None = None) -> 
             try:
                 run_workbuddy_tasks(account, log=log, settings=settings)
             except Exception as exc:  # noqa: BLE001
-                _log(log, f"[成长任务] 异常: {exc}")
+                _log(log, f"[成长任务] 异常: {mask_text(exc, 160)}")
     return results
 
 
@@ -323,41 +383,225 @@ class DailyScheduler:
             if self._stop.is_set():
                 return
         _log(self._log, f"[{slot}] 开始本机日签调度")
-        run_local_all(require_license=True, log=self._log)
+        try:
+            run_local_all(require_license=True, log=self._log)
+        except Exception as exc:  # noqa: BLE001 - 整批兜底：炸在这里会让调度线程结束，之后所有签到静默停摆
+            _log(self._log, f"[{slot}] 调度执行异常: {mask_text(exc, 200)}")
+        # 异常也算"这个窗口跑过了"：否则会每 20 秒重放一次，反复打供应商并刷满日志。
+        # 真漏掉的号还有晚间补漏窗口兜底。
         self._fired.add(key)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            settings = load_settings()
-            if not settings.get("auto_schedule", True):
-                self._stop.wait(30)
-                continue
-            # 代跑凭证保鲜：启动先跑一次，之后每 6 小时一次
-            if time.time() - self._last_server_sync >= SERVER_SYNC_INTERVAL_SEC:
-                self._last_server_sync = time.time()
-                try:
-                    refresh_server_credentials(log=self._log)
-                except Exception as exc:  # noqa: BLE001
-                    _log(self._log, f"[代跑凭证] 同步异常: {exc}")
-            now = datetime.now()
-            day = now.strftime("%Y-%m-%d")
-            # morning
+            # 循环体整体兜底：这个线程一死，早晚签到就静默停了，用户看不出来。
+            # （设置读取 / 账号文件读取 / 解析都可能在循环里抛，见 vault.load 的 OSError）
+            try:
+                self._tick()
+            except Exception as exc:  # noqa: BLE001
+                _log(self._log, f"[调度] 轮次异常: {mask_text(exc, 200)}")
+            self._stop.wait(20)
+
+    def _tick(self) -> None:
+        settings = load_settings()
+        if not settings.get("auto_schedule", True):
+            return  # 等下一轮由 _loop 的 20 秒间隔驱动
+        # 代跑凭证保鲜：启动先跑一次，之后每 6 小时一次
+        if time.time() - self._last_server_sync >= SERVER_SYNC_INTERVAL_SEC:
+            self._last_server_sync = time.time()
+            try:
+                refresh_server_credentials(log=self._log)
+            except Exception as exc:  # noqa: BLE001
+                _log(self._log, f"[代跑凭证] 同步异常: {mask_text(exc, 200)}")
+        now = datetime.now()
+        day = now.strftime("%Y-%m-%d")
+        # morning
+        self._maybe_run_slot(
+            settings,
+            now,
+            day,
+            "morning",
+            int(settings.get("schedule_hour") or 9),
+            int(settings.get("schedule_minute") or 10),
+        )
+        # evening补漏
+        if settings.get("evening_schedule", True):
             self._maybe_run_slot(
                 settings,
                 now,
                 day,
-                "morning",
-                int(settings.get("schedule_hour") or 9),
-                int(settings.get("schedule_minute") or 10),
+                "evening",
+                int(settings.get("evening_hour") or 20),
+                int(settings.get("evening_minute") or 0),
             )
-            # evening补漏
-            if settings.get("evening_schedule", True):
-                self._maybe_run_slot(
-                    settings,
-                    now,
-                    day,
-                    "evening",
-                    int(settings.get("evening_hour") or 20),
-                    int(settings.get("evening_minute") or 0),
-                )
-            self._stop.wait(20)
+
+
+def clamp_sync_minutes(value: Any, default: int = 5) -> int:
+    """同步间隔：留空 / 0 / 非数字都退回默认，其余夹到 1..240 分钟。"""
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minutes == 0:
+        return default
+    return max(1, min(minutes, 240))
+
+
+def _sync_minutes(settings: dict[str, Any]) -> int:
+    return clamp_sync_minutes(settings.get("auto_sync_minutes"))
+
+
+class AutoSyncer:
+    """定时把「哪些号跑了 / 现在多少积分」拉到界面，省掉手点。
+
+    视图数据（服务器代跑状态、跑批记录）走 ``account_store`` 的 15 秒 TTL 缓存，
+    界面每 30 秒重读一次几乎零成本；积分得逐个问供应商，所以单独用更长的间隔
+    （``auto_sync_minutes``），并让路给正在执行的手动任务。
+    """
+
+    TICK_SEC = 30.0
+    FIRST_DELAY_SEC = 4.0
+
+    def __init__(
+        self,
+        *,
+        get_settings: Callable[[], dict[str, Any]],
+        is_busy: Callable[[], bool] | None = None,
+        log: LogFn | None = None,
+    ) -> None:
+        self._get_settings = get_settings
+        self._is_busy = is_busy or (lambda: False)
+        self._log = log
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        # 0 = 启动后第一次 tick 就同步，界面不至于先空着
+        self._last_credit_sync = 0.0
+        self._syncing = False
+        self._last: dict[str, Any] = {"at": None, "message": "尚未同步"}
+
+    # ------------------------------------------------------------ 生命周期
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        # 重新开启（含卡密失效后恢复）应当立刻拉一次，别等满一个间隔
+        self._last_credit_sync = 0.0
+        self._thread = threading.Thread(target=self._loop, name="auto-sync", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def sync_soon(self) -> None:
+        """让下一次 tick 立刻同步：激活卡密、刚打开开关时调用。"""
+        self._last_credit_sync = 0.0
+
+    def syncing(self) -> bool:
+        return self._syncing
+
+    def status(self) -> dict[str, Any]:
+        settings = self._get_settings()
+        with self._lock:
+            last = dict(self._last)
+        return {
+            **last,
+            "enabled": bool(settings.get("auto_sync", True)),
+            "minutes": _sync_minutes(settings),
+            "running": bool(self._thread and self._thread.is_alive()),
+        }
+
+    # ------------------------------------------------------------ 同步动作
+    def sync_once(self, *, reason: str = "自动", query_credits: bool = True) -> dict[str, Any]:
+        """拉一次：服务器状态 + 本机账号积分。阻塞，调用方放到线程里跑。
+
+        全局只允许一份在跑（``try_acquire_credit_slot``）：自动同步、手动同步、
+        刷新积分并发问同一个账号，只会换来供应商限流和互相覆盖的回写。
+        """
+        if not try_acquire_credit_slot():
+            return {"ok": False, "busy": True, "message": "已有同步任务在执行，请等待完成"}
+        self._syncing = True
+        try:
+            return self._run_sync(reason=reason, query_credits=query_credits)
+        finally:
+            self._syncing = False
+            release_credit_slot()
+
+    def _run_sync(self, *, reason: str, query_credits: bool) -> dict[str, Any]:
+        account_store.invalidate_server_cache()
+        rows = account_store.load_accounts()
+        # today_board 顺带把服务器聚合的跑批记录拉回来；账号视图复用上面那份
+        board = account_store.today_board(accounts=rows)
+        checked = changed = failed = 0
+        if query_credits:
+            for row in rows:
+                if self._stop.is_set():
+                    break
+                if not row.get("enabled", True):
+                    continue
+                blob = row.get("token_blob") if isinstance(row.get("token_blob"), dict) else {}
+                if not (blob.get("token") or blob.get("access_token")):
+                    continue  # 纯服务器代跑记录：本机没凭证，问不了
+                info = refresh_account_credits(row, skip_if_unchanged=True)
+                checked += 1
+                if not info.get("ok"):
+                    failed += 1
+                elif info.get("changed"):
+                    changed += 1
+                time.sleep(0.3)
+        summary = {
+            "at": datetime.now().strftime("%H:%M:%S"),
+            "reason": reason,
+            "accounts": len(rows),
+            "checked": checked,
+            "changed": changed,
+            "failed": failed,
+            "done": board.get("done_count"),
+            "pending": board.get("pending_count"),
+            "runFailed": board.get("failed_count"),
+            "message": (
+                f"同步完成：今日已跑 {board.get('done_count', 0)}/{board.get('total_enabled', 0)}，"
+                f"积分查询 {checked} 个"
+                + (f"，{failed} 个失败" if failed else "")
+                + (f"，{changed} 个有变化" if changed else "")
+            ),
+        }
+        with self._lock:
+            self._last = dict(summary)
+        if changed or failed or reason != "自动":
+            _log(self._log, f"[{reason}同步] {summary['message']}")
+        return {"ok": True, **summary}
+
+    def _due(self, settings: dict[str, Any]) -> bool:
+        return time.time() - self._last_credit_sync >= _sync_minutes(settings) * 60
+
+    def tick(self) -> bool:
+        """判定并（该同步时）执行一次同步，返回是否真的同步了。"""
+        settings = self._get_settings()
+        if (
+            not settings.get("auto_sync", True)
+            or self._is_busy()
+            or credit_slot_busy()  # 手动同步/刷新积分正在跑，让路
+            or not self._due(settings)
+        ):
+            return False
+        # 先记时间戳：这一次失败也不该下一轮重来，免得卡在网络坏的时候
+        # （激活成功的时机由界面调 sync_soon() 补回来）
+        self._last_credit_sync = time.time()
+        ok, _msg = ensure_licensed(settings, force_online=False)
+        if not ok:
+            return False
+        try:
+            self.sync_once(reason="自动")
+        except Exception as exc:  # noqa: BLE001 - 后台同步不能把线程搞没了
+            _log(self._log, f"[自动同步] 异常: {exc}")
+            return False
+        return True
+
+    def _loop(self) -> None:
+        self._stop.wait(self.FIRST_DELAY_SEC)
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001
+                _log(self._log, f"[自动同步] 轮次异常: {exc}")
+            self._stop.wait(self.TICK_SEC)
