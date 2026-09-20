@@ -550,6 +550,7 @@ class CheckinApi:
         if not auths:
             return {"ok": False, "message": err or "无登录态"}
         labels = []
+        blocked: list[str] = []
         replacement_suggestion = None # 初始化建议
         for auth in auths:
             account_data = {
@@ -561,18 +562,27 @@ class CheckinApi:
                 "token_blob": auth,
                 "last_error": "",
             }
-            upserted_account = account_store.upsert_account(account_data)
+            stored = account_store.try_upsert_account(account_data)
+            if not stored.get("ok"):
+                # 额度拦住的是「这一个」账号：记下来继续采下一个，
+                # 抛出去会让整批采集中途 abort、已入库的一半没人收尾
+                blocked.append(str(auth.get("nickname") or auth.get("uid")))
+                self._append_log(f"未入库 {blocked[-1]}：{stored.get('message')}")
+                continue
             labels.append(auth.get("nickname") or auth.get("uid"))
             
             # 获取替换建议
             if not replacement_suggestion: # 只取第一个账号的建议
-                suggestion = self._get_replacement_suggestion(upserted_account)
+                suggestion = self._get_replacement_suggestion(stored.get("account") or {})
                 if suggestion:
                     replacement_suggestion = suggestion
 
-        self._append_log(f"已采集 WorkBuddy {len(auths)} 个账号：{', '.join(str(x) for x in labels)}")
+        self._append_log(f"已采集 WorkBuddy {len(labels)} 个账号：{', '.join(str(x) for x in labels)}")
         
-        result = {"ok": True, "message": f"采集成功（{len(auths)} 个账号）", "count": len(auths)}
+        result = {"ok": True, "message": f"采集成功（{len(labels)} 个账号）", "count": len(labels)}
+        if blocked:
+            result["blocked"] = len(blocked)
+            result["message"] += f"，{len(blocked)} 个未入库（额度不足）"
         if replacement_suggestion:
             result["replacement_suggestion"] = replacement_suggestion
         return result
@@ -584,6 +594,7 @@ class CheckinApi:
         stored = 0
         need_token = False
         enabled_count = 0
+        quota_blocked: list[str] = []  # 额度拦下的号（逐条收集，不中断整批采集）
         replacement_suggestion = None # 初始化建议
         for auth in auths:
             blocked = traework._blocked_region(auth) if auth.get("token") else ""
@@ -613,14 +624,19 @@ class CheckinApi:
                 "token_blob": auth,
                 "last_error": note,
             }
-            upserted_account = account_store.upsert_account(account_data)
+            stored_result = account_store.try_upsert_account(account_data)
+            if not stored_result.get("ok"):
+                # 额度只拦住这一个号：记一笔继续采下一个（`blocked` 这个名字已被
+                # 「区域受限」占用，这里用 quota_blocked）
+                quota_blocked.append(f"{uid or '未知'}：{stored_result.get('message')}")
+                continue
             stored += 1
             identities.append(str(auth.get("user_id") or auth.get("auth_key") or "traework"))
             saved.append(f"{uid or '未知'}({auth.get('user_region') or '?'})" + (f" {note}" if note else ""))
 
             # 获取替换建议
             if not replacement_suggestion: # 只取第一个账号的建议
-                suggestion = self._get_replacement_suggestion(upserted_account)
+                suggestion = self._get_replacement_suggestion(stored_result.get("account") or {})
                 if suggestion:
                     replacement_suggestion = suggestion
 
@@ -630,7 +646,12 @@ class CheckinApi:
             "need_token": need_token,
             "saved": saved,
             "identities": identities,
+            "quota_blocked": quota_blocked,
         }
+        if quota_blocked:
+            self._append_log(
+                f"额度不足，{len(quota_blocked)} 个账号未入库：{quota_blocked[0]}"
+            )
         if replacement_suggestion:
             result["replacement_suggestion"] = replacement_suggestion
         return result
@@ -783,7 +804,7 @@ class CheckinApi:
         }
         if not blob["machine_id"] or not blob["device_id"]:
             return {"ok": False, "message": "缺少设备头，请先打开一次 TraeWork"}
-        account_store.upsert_account(
+        stored = account_store.try_upsert_account(
             {
                 "provider": "traework",
                 "label": blob.get("user_id") or "traework-manual",
@@ -793,6 +814,10 @@ class CheckinApi:
                 "token_blob": blob,
             }
         )
+        if not stored.get("ok"):
+            # 单条手工导入：把额度原因（code/seats/used）原样交给界面，由它引导升档，
+            # 而不是抛异常让 JS 侧收到一句「未处理的异常」。
+            return dict(stored)
         self._append_log("已手工导入 TraeWork token")
         return {"ok": True, "message": "已导入"}
 
@@ -951,7 +976,12 @@ class CheckinApi:
                 if str(account.get("provider")) == "workbuddy":
                     # 告诉服务器：这个账号代跑时要不要顺带做成长任务
                     account["task_enabled"] = self.settings.get("workbuddy_task_mode") == "server"
-                account_store.upsert_account(account)
+                stored = account_store.try_upsert_account(account)
+                if not stored.get("ok"):
+                    # 批量路径：一条失败只跳过这一条。异常冒出去会让整批中断，
+                    # 前面已经改过 run_mode 的账号就停在半完成状态没人收尾。
+                    self._append_log(f"账号 {account.get('id')} 未能标记为代跑：{stored.get('message')}")
+                    continue
                 result = server_client.sync_server_blob(account, log=self._append_log, force=True)
                 if not result:
                     self._append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")
@@ -1058,7 +1088,11 @@ class CheckinApi:
             if old_account.get("source") != "server":
                 old_account["run_mode"] = "local"
                 old_account.pop("server_account_id", None)
-                account_store.upsert_account(old_account)
+                # 纯状态回写：写不进只记日志，不能因为本地存储失败就中断更换流程
+                # ——服务器上的旧记录此刻已经删掉了。
+                rollback = account_store.try_upsert_account(old_account)
+                if not rollback.get("ok"):
+                    self._append_log(f"旧账号 {old_account_id} 本地状态回写失败：{rollback.get('message')}")
         except Exception as exc:
             self._append_log(f"调用服务器删除旧账号接口异常: {exc}")
             return {"ok": False, "message": f"调用服务器删除旧账号接口异常: {exc}"}
@@ -1068,19 +1102,24 @@ class CheckinApi:
             self._append_log(f"正在上传新账号 {new_account_id} 到服务器")
             # 将新账号设置为服务器模式
             new_account["run_mode"] = "server"
-            # 更新本地 account_store，因为它现在是服务器模式了
-            account_store.upsert_account(new_account)
+            # 更新本地 account_store，因为它现在是服务器模式了。
+            # 这一步是后面上传的前提：本机没落成 server 就不要往服务器推，
+            # 否则会出现「服务器在代跑、本机界面看不到」的分裂状态。
+            switched = account_store.try_upsert_account(new_account)
+            if not switched.get("ok"):
+                new_account["run_mode"] = "local"
+                return {"ok": False, **switched}
             
             # 同步到服务器
             server_sync_result = server_client.sync_server_blob(new_account, log=self._append_log, force=True)
             if server_sync_result is None:
                 new_account["run_mode"] = "local"
-                account_store.upsert_account(new_account)
+                account_store.try_upsert_account(new_account)
                 return {"ok": False, "message": f"新账号 {new_account_id} 没有可用 token，无法上传代跑"}
             if not server_sync_result.get("ok"):
                 # 上传失败就把本机这行退回本机模式，别留一个「显示在代跑、其实服务器没有」的状态
                 new_account["run_mode"] = "local"
-                account_store.upsert_account(new_account)
+                account_store.try_upsert_account(new_account)
                 reason = server_sync_result.get("message") or "未知错误"
                 self._append_log(f"新账号 {new_account_id} 上传服务器失败: {reason}")
                 return {"ok": False, "message": f"新账号上传服务器失败: {reason}"}
@@ -1092,7 +1131,7 @@ class CheckinApi:
             self._append_log(f"上传新账号到服务器异常: {exc}")
             # 同样，如果上传失败，尝试回滚本地账号为本地模式
             new_account["run_mode"] = "local"
-            account_store.upsert_account(new_account)
+            account_store.try_upsert_account(new_account)
             return {"ok": False, "message": f"上传新账号到服务器异常: {exc}"}
 
     def _get_replacement_suggestion(self, new_local_account: dict[str, Any]) -> dict[str, Any] | None:

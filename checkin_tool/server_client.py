@@ -135,8 +135,13 @@ def normalize_entitlement(data: dict[str, Any]) -> dict[str, Any]:
     quota = _as_int(_pick(data, "quota", "accountQuota", "account_quota", "account_limit", "accountLimit"))
     used = _as_int(_pick(data, "used", "accountUsed", "used_count", "usedCount"))
     return {
-        # 0 / 负数在服务端表示「没配额度」，与「不限」同样处理：不阻断用户。
-        "quota": quota if quota is None or quota > 0 else None,
+        # quota 服务端永远给数字（行缺失时兜底 default=10），所以 **0 是真额度**：
+        # 坐席全部到期时 reconcileCapacity 会把 account_quota 反写成 0。
+        # 旧实现在这里把 0 抹成 None（= 不限），于是本机显示「不限账号」，
+        # 而服务端同期正把该授权的账号逐个停用 —— 两端口径必须一致。
+        # 现网实测 8 条权益行 quota 全 > 0（最小 1），保留 0 不会误伤任何现有用户。
+        # 负数仍按「未配置」处理。
+        "quota": quota if quota is None or quota >= 0 else None,
         "used": used,
         "contactEmail": str(_pick(data, "contactEmail", "contact_email", "email") or ""),
         "contactVerified": _as_bool(_pick(data, "contactVerified", "contact_verified", "verified")),
@@ -229,7 +234,10 @@ def sync_server_blob(
         account["server_synced_hint"] = fp
         account["server_synced_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if account.get("id"):
-            account_store.upsert_account(account)
+            # 回写同步戳失败不能掀翻整轮凭证保鲜（批量循环里逐条继续）
+            stored = account_store.try_upsert_account(account)
+            if not stored.get("ok") and log:
+                log(f"同步标记写入失败（{label}）：{stored.get('message')}")
         if log:
             log(f"代跑凭证已同步服务器：{label}")
     elif log:

@@ -178,7 +178,9 @@ def test_board_and_usage_reuse_preloaded_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(account_store, "public_account_view", lambda a, _t: {**a, "today_status": "未跑"})
     monkeypatch.setattr(account_store, "refresh_entitlement", lambda **_kw: {})
     monkeypatch.setattr(account_store, "get_entitlement", lambda: {})
-    monkeypatch.setattr(account_store, "get_account_limit", lambda: 3)
+    monkeypatch.setattr(
+        account_store, "resolve_account_quota", lambda: {"limit": 3, "known": True, "source": "server"}
+    )
 
     board = account_store.today_board(accounts=[{"id": "a", "enabled": True}], today={})
     usage = account_store.get_account_usage(accounts=[{"id": "a", "enabled": True}, {"id": "b", "enabled": False}])

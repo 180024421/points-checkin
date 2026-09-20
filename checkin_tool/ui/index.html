@@ -1421,28 +1421,39 @@
       chip.textContent = valid ? '已授权' : '未授权';
       chip.className = 'chip ' + (valid ? 'ok' : 'warn');
       // 按账号数计费：展示套餐 + 已用/上限
-      const limit = (usage.limit != null) ? Number(usage.limit)
-        : (inner.accountLimit != null ? Number(inner.accountLimit) : null);
       const used = (usage.used != null)
         ? Number(usage.used)
         : ((inner.accountUsed != null) ? Number(inner.accountUsed) : 0);
       const plan = usage.planLabel || inner.accountPlanLabel || inner.planLabel || '';
-      const limitText = limit === null ? '不限账号' : `${limit} 个账号`;
-      if (limit !== null) {
-        // 额度用满或已超限时给出升级引导
-        const full = used >= limit;
-        $('chip-account-limit').textContent =
-          `套餐：${plan ? plan + ' · ' : ''}${limitText}（已用 ${used}/${limit}${full ? ' · 已满，升级套餐可挂载更多' : ''}）`;
-      } else {
-        $('chip-account-limit').textContent = `套餐：${plan || '未配置'} · ${limitText}`;
+      // 额度三态：limit 有数 = 已知；null = **未知**（离线/卡密要重新激活），
+      // 不再是「不限账号」——旧文案会让用户以为能随便挂，回联网才发现新增被拒。
+      const limit = (usage.limit != null) ? Number(usage.limit)
+        : (inner.accountLimit != null ? Number(inner.accountLimit) : null);
+      const unknown = limit === null;
+      const state = unknown ? 'offline' : (limit === 0 ? 'expired' : (used >= limit ? 'full' : 'ok'));
+      const texts = {
+        offline: `额度未知（离线，暂时无法新增账号）· 已用 ${used}`,
+        expired: `坐席已全部到期，续卡或买卡后即可恢复`,
+        full: `额度已满 ${used}/${limit}，升级套餐可挂载更多`,
+        ok: `${limit} 个账号（已用 ${used}/${limit}）`,
+      };
+      let chipText = `套餐：${plan || '未配置'} · ${texts[state]}`;
+      // 到期倒计时：时长轴原本在界面上完全看不见（3.1 已经把 epoch/ISO 都解析了）。
+      // state=expired 时前半句已经在说「全部到期」，再补一句「0 天后到期」像出 bug。
+      if (state !== 'expired' && !usage.timeUnlimited && usage.expireDaysLeft != null) {
+        chipText += usage.expireDaysLeft <= 7 ? ` · ${usage.expireDaysLeft} 天后到期` : ` · ${usage.expireDaysLeft} 天`;
       }
-      const over = limit !== null && used > limit;
-      $('chip-account-limit').className = 'chip ' + (valid ? (over ? 'warn' : 'ok') : 'off');
-      // 服务端要求代跑前先绑定联系邮箱：未绑定时把入口直接挂在额度标签上
       const limitChip = $('chip-account-limit');
+      limitChip.textContent = chipText;
+      // 未知/到期/用满都要显性标出来（warn），别只在红色 toast 里一闪
+      limitChip.className = 'chip ' + (valid ? (state === 'ok' ? 'ok' : 'warn') : 'off');
+      limitChip.title = unknown
+        ? '取不到套餐额度：请联网后重试，或在设置页重新激活卡密。已有账号照常签到。'
+        : '点击可查看/升级套餐';
+      // 邮箱只决定「异常时收不收邮件」，不是代跑前置条件：入口留在标签上，
+      // 但不再覆盖上面算好的颜色（旧代码一句 class='warn' 把额度状态冲掉了）。
       if (usage.contactVerified === false) {
-        limitChip.textContent += ' · 代跑邮箱未绑定，点此绑定';
-        limitChip.className = 'chip warn';
+        limitChip.textContent += ' · 可选：点此绑定邮箱接收异常通知';
         limitChip.style.cursor = 'pointer';
         limitChip.onclick = openContactBind;
       } else {
@@ -1590,7 +1601,18 @@
       try {
         const r = await fn();
         logLine(r.message || okMsg || '完成', r.ok ? 'ok' : 'err');
-        if (!r.ok && r.message) showToast(r.message, 'err');
+        if (!r.ok && r.message) {
+          // 额度类失败不能只是一句红字：后端已经把 code/seats/used 一起返回了，
+          // 界面要说清「为什么」和「怎么办」。
+          // QUOTA_UNKNOWN 用中性提示——已有账号不受影响，只是暂时不能新增，
+          // 报成红色错误会让人以为签到挂了。
+          const hint = r.code === 'QUOTA_UNKNOWN'
+            ? '暂时取不到套餐额度：已有账号照常签到，联网或在设置页重新激活卡密后可继续新增'
+            : r.code === 'QUOTA_EXCEEDED'
+              ? `套餐仅支持 ${r.seats} 个账号（已用 ${r.used}）：升级套餐或先停用部分账号`
+              : '';
+          showToast(hint || r.message, r.code === 'QUOTA_UNKNOWN' ? 'info' : 'err', 8000);
+        }
         // 联系邮箱未绑定只是引导，不是门槛：操作已经成功，只补一条不打断流程的提示
         // （常驻入口在顶部额度标签上，见 applyLicense 的 contactVerified 分支）
         if (r.ok && r.notice) showToast(r.notice, 'info', 6000);

@@ -27,8 +27,9 @@ def test_normalize_entitlement_tolerates_field_names():
     other = server_client.normalize_entitlement({"accountQuota": "3", "contact_verified": "1"})
     assert other["quota"] == 3
     assert other["contactVerified"] is True
-    # 0 / 负数 = 未配置额度，与「不限」同样处理
-    assert server_client.normalize_entitlement({"quota": 0})["quota"] is None
+    # 0 是服务端反写的真额度（坐席全部到期），必须原样保留；负数才算「未配置」
+    assert server_client.normalize_entitlement({"quota": 0})["quota"] == 0
+    assert server_client.normalize_entitlement({"quota": -1})["quota"] is None
     assert server_client.normalize_entitlement({})["quota"] is None
     assert server_client.normalize_entitlement({})["contactVerified"] is None
 
@@ -38,9 +39,9 @@ def test_account_limit_prefers_entitlement_over_license(monkeypatch):
     monkeypatch.setattr(license_client, "load_cache", lambda: {"accountLimit": 1})
     try:
         # 服务端额度取不到时才有 accountLimit 兜底（它是设备座位数）
-        assert account_store.get_account_limit() == 1
+        assert account_store.resolve_account_quota() == {"limit": 1, "known": True, "source": "cache"}
         monkeypatch.setattr(account_store, "_ent_cache", (time.monotonic(), {"quota": 10}))
-        assert account_store.get_account_limit() == 10
+        assert account_store.resolve_account_quota() == {"limit": 10, "known": True, "source": "server"}
     finally:
         _reset()
 

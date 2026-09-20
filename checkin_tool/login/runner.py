@@ -33,6 +33,7 @@ def login_credential(cred: dict[str, Any], *, headed: bool = True, log: LogFn | 
         result.message = mask_text(result.message, 200)
 
     linked_id = None
+    blocked_note = ""  # 登录成功但额度拦住没入库时，把原因带进账密记录
     if result.ok and result.token_blob:
         blob = dict(result.token_blob)
         label = (
@@ -43,7 +44,7 @@ def login_credential(cred: dict[str, Any], *, headed: bool = True, log: LogFn | 
             or username
         )
         identity = blob.get("uid") or blob.get("user_id") or username
-        account = account_store.upsert_account(
+        stored = account_store.try_upsert_account(
             {
                 "provider": provider,
                 "label": label,
@@ -55,8 +56,15 @@ def login_credential(cred: dict[str, Any], *, headed: bool = True, log: LogFn | 
                 "credential_id": cred.get("id"),
             }
         )
-        linked_id = str(account.get("id"))
-        log(f"登录成功 [{result.method}] → 账号入库 {label}")
+        if stored.get("ok"):
+            linked_id = str((stored.get("account") or {}).get("id"))
+            log(f"登录成功 [{result.method}] → 账号入库 {label}")
+        else:
+            # 登录本身是成功的（token 真拿到了），只是这个号挂不进额度。
+            # 绝不能让 QuotaBlocked 从这里冒出去：它跑在后台登录线程里，
+            # 一冒出来整批登录中途 abort，前面已入库的账号就成了没人管的脏数据。
+            blocked_note = str(stored.get("message") or "账号未入库")
+            log(f"登录成功 [{result.method}]，但账号未入库：{blocked_note}")
     else:
         log(f"登录失败：{result.message}")
 
@@ -65,7 +73,7 @@ def login_credential(cred: dict[str, Any], *, headed: bool = True, log: LogFn | 
             str(cred["id"]),
             ok=result.ok,
             method=result.method,
-            error="" if result.ok else result.message,
+            error=blocked_note if result.ok else result.message,
             linked_account_id=linked_id,
         )
     return result

@@ -411,15 +411,24 @@ class CheckinApp(tk.Tk):
         limit = usage.get("limit")
         plan = usage.get("planLabel") or ""
         if limit is None:
-            quota_text = f"{used}/不限"
+            # 新口径：limit=None 只剩「额度未知」这一种含义（离线 / 卡密要重新激活），
+            # 不再当「不限」。旧文案会让用户以为能随便挂，回联网才发现新增被拒。
+            quota_text = f"{used}/额度未知（离线，暂时无法新增账号）"
         else:
-            detail = "已满，升级套餐可挂载更多" if used >= limit else f"剩余 {usage.get('remain')}"
+            if limit == 0:
+                # quota=0 是新口径下的真额度：坐席已全部到期（不是「不限」）。
+                # 必须给出路，否则用户以为程序坏了。
+                detail = "坐席已全部到期，续卡或买卡后即可恢复"
+            elif used >= limit:
+                detail = "额度已满，升级套餐可挂载更多"
+            else:
+                detail = f"剩余 {usage.get('remain')}"
             quota_text = f"{used}/{limit}（{detail}）"
         if plan:
             quota_text += f" - {plan}"
         if usage.get("contactVerified") is False:
-            # 服务端要求代跑前绑定联系邮箱，这里提前提示，别等上传时才报错
-            quota_text += " · 代跑邮箱未绑定"
+            # 邮箱只决定「异常时收不收邮件」，不是代跑前置条件（plan 3.7）
+            quota_text += " · 可选：绑邮箱后异常能收到邮件"
 
         self.after(0, lambda:
             self.lbl_account_quota.configure(text="账号额度：" + quota_text)
@@ -750,11 +759,14 @@ class CheckinApp(tk.Tk):
         if not auths:
             messagebox.showerror("采集失败", err or "无登录态")
             return
+        quota_blocked: list[str] = []
+        saved: list[str] = []
         for auth in auths:
-            account_store.upsert_account(
+            label = str(auth.get("nickname") or auth.get("uid") or "workbuddy")
+            stored = account_store.try_upsert_account(
                 {
                     "provider": "workbuddy",
-                    "label": auth.get("nickname") or auth.get("uid"),
+                    "label": label,
                     "identity": auth.get("uid"),
                     "run_mode": "local",
                     "enabled": True,
@@ -762,10 +774,14 @@ class CheckinApp(tk.Tk):
                     "last_error": "",
                 }
             )
-        self.append_log(
-            f"已采集 WorkBuddy {len(auths)} 个账号："
-            + "、".join(str(a.get("nickname") or a.get("uid")) for a in auths)
-        )
+            if not stored.get("ok"):
+                # 批量采集：额度拦住一个号不能掀翻整批，剩下的照常入库
+                quota_blocked.append(f"{label}：{stored.get('message')}")
+                continue
+            saved.append(label)
+        if quota_blocked:
+            self.append_log(f"额度不足，{len(quota_blocked)} 个账号未入库：{quota_blocked[0]}")
+        self.append_log(f"已入库 WorkBuddy {len(saved)} 个账号：" + "、".join(saved))
         self.refresh_accounts()
         self.refresh_today()
 
@@ -793,7 +809,7 @@ class CheckinApp(tk.Tk):
         if not blob["machine_id"] or not blob["device_id"]:
             messagebox.showerror("缺少设备头", "请先打开一次 TraeWork 桌面端")
             return
-        account_store.upsert_account(
+        stored = account_store.try_upsert_account(
             {
                 "provider": "traework",
                 "label": blob.get("user_id") or "traework-manual",
@@ -803,6 +819,12 @@ class CheckinApp(tk.Tk):
                 "token_blob": blob,
             }
         )
+        if not stored.get("ok"):
+            # 单条导入：直接把额度/存储原因弹窗告知，不能让异常冒出来打断按钮回调
+            self.append_log(f"TraeWork token 未入库：{stored.get('message')}")
+            messagebox.showwarning("未入库", str(stored.get("message") or "账号入库失败"))
+            self.refresh_accounts()
+            return
         self.append_log("已手工导入 TraeWork token")
         self.refresh_accounts()
 
@@ -822,6 +844,7 @@ class CheckinApp(tk.Tk):
             return
         tags = traework.user_tags()
         saved: list[str] = []
+        quota_blocked: list[str] = []  # 「未入库」而不是「跳过」：token 已解密成功，只是挂不进额度
         for auth in todo:
             blocked = traework._blocked_region(auth)
             if blocked:
@@ -832,7 +855,7 @@ class CheckinApp(tk.Tk):
             if uid and tags.get(uid):
                 # 下面 upsert 的 token_blob 就是 auth，标签写在这里即可
                 auth["user_tag"] = tags[uid]
-            account_store.upsert_account(
+            stored = account_store.try_upsert_account(
                 {
                     "provider": "traework",
                     "label": uid or auth.get("nickname") or "traework",
@@ -843,12 +866,19 @@ class CheckinApp(tk.Tk):
                     "last_error": f"区域 {blocked}，签到仅支持 CN 区，已停用" if blocked else "",
                 }
             )
+            if not stored.get("ok"):
+                # 注意：这里不能复用 blocked —— 上面那个 blocked 是「受限区域」
+                quota_blocked.append(f"{uid or '未知'}：{stored.get('message')}")
+                continue
             saved.append(uid or "未知")
         known = traework.known_user_ids()
         collected = {str(a.get("user_id") or "") for a in todo}
         missing = [u for u in known if u not in collected]
+        if quota_blocked:
+            # 与 pywebview 端同一句口径：报「未入库」而不是笼统的「失败」
+            self.append_log(f"额度不足，{len(quota_blocked)} 个账号未入库：{quota_blocked[0]}")
         self.append_log(
-            f"已采集 TraeWork {len(todo)} 个账号：{', '.join(saved)}"
+            f"已入库 TraeWork {len(saved)} 个账号：{', '.join(saved)}"
             + (f"；另有 {len(missing)} 个历史账号 token 已被覆盖，需重新登录一次" if missing else "")
         )
         self.refresh_accounts()
@@ -967,7 +997,11 @@ class CheckinApp(tk.Tk):
                 if str(account.get("provider")) == "workbuddy":
                     # 告诉服务器：这个账号代跑时要不要顺带做成长任务
                     account["task_enabled"] = self.settings.get("workbuddy_task_mode") == "server"
-                account_store.upsert_account(account)
+                stored = account_store.try_upsert_account(account)
+                if not stored.get("ok"):
+                    # 后台线程里的异常没人接：一条写不进只跳过这条，整批继续
+                    self.append_log(f"账号 {account.get('id')} 未能标记为代跑：{stored.get('message')}")
+                    continue
                 result = server_client.sync_server_blob(account, log=self.append_log, force=True)
                 if not result:
                     self.append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")

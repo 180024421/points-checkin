@@ -180,45 +180,52 @@ def _enabled_count(rows: list[dict[str, Any]]) -> int:
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def get_account_limit() -> int | None:
-    """可挂载账号数上限。
+def resolve_account_quota() -> dict[str, Any]:
+    """坐席额度三态解析：``{limit, known, source}``。**只读缓存，不打 HTTP**（持锁路径可调）。
 
-    以服务端代挂权益（``/entitlement/info`` 的 ``quota``，对应
-    ``checkin_entitlement.account_quota``，按卡密/卡种配置）为准；这里只读缓存，
-    取不到时才退回授权缓存里的 ``accountLimit`` 作离线兜底。
-
-    注意 ``accountLimit`` 在服务端是按「设备座位数」校验的，和代挂额度语义不同，
-    所以它只能当兜底值：服务端一旦可达就以 quota 为准。None = 不限。
+    - ``source="server"``：``/entitlement/info`` 的 ``quota``（对应
+      ``checkin_entitlement.account_quota``，由服务端 ``reconcileCapacity`` 反写）。
+      **0 是有效额度**（坐席自然到期 = 0 个），不能再当「不限」放行 ——
+      现网 8 条权益行实测 quota 全 > 0（最小 1），所以把 0 认作已知额度不会误伤任何现有用户。
+    - ``source="cache"``：服务端不可达时，退回授权状态里的 ``accountLimit``。
+      它在服务端是按「设备座位数」校验的，语义不同，只能当离线兜底。
+    - ``known=False``：两个来源都没有值。此时**拒绝新增挂载，但绝不停用/清空已有账号**
+      —— 旧实现把「取不到」并进来当成「不限」，任何一次授权抖动都把额度闸门打开。
     """
-    quota = get_entitlement().get("quota")
-    if quota is not None:
+    raw = get_entitlement().get("quota")
+    if raw is not None:
         try:
-            quota = int(quota)
+            return {"limit": int(raw), "known": True, "source": "server"}
         except (TypeError, ValueError) as e:
-            _warn(f"代挂额度不是数字：{quota}（{e}）")
-        else:
-            if quota > 0:
-                return quota
+            _warn(f"代挂额度不是数字：{raw}（{e}）")
     try:
         from .license_client import load_cache
 
-        limit = load_cache().get("accountLimit")
-        if limit is None:
-            return None
-        try:
-            limit = int(limit)
-        except ValueError as e:
-            # Log the error for debugging, but still return None as per original logic
-            _warn(f"accountLimit 不是数字：{limit}（{e}）")
-            return None
-        return limit if limit > 0 else None
+        limit = _quota_number(load_cache().get("accountLimit"), "accountLimit")
+        if limit is not None:
+            return {"limit": limit, "known": True, "source": "cache"}
     except Exception as e:  # noqa: BLE001
         _warn(f"读取账号上限失败：{e}")
+    return {"limit": None, "known": False, "source": ""}
+
+
+def _quota_number(raw: Any, label: str) -> int | None:
+    if raw is None or isinstance(raw, bool):
         return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        _warn(f"{label} 不是数字：{raw}")
+        return None
+    # 0 留给调用方判断（= 已知额度为 0）；负数才是「未配置/不限」
+    return value if value >= 0 else None
 
 
 def get_account_usage(*, accounts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """供界面展示：{limit, used, remain, planLabel, expireAt, contactVerified, contactEmail}。
+    """供界面展示：{limit, quotaKnown, quotaSource, used, remain, planLabel,
+    expireAt, expireAtIso, expireDaysLeft, timeUnlimited, contactVerified, contactEmail}。
+
+    ``limit=None`` 只表示**额度未知**（不是「不限」），界面要用 ``quotaKnown`` 区分。
 
     会先刷一次代挂权益（HTTP 在此处、锁外发起），保证界面显示的是服务端额度。
     ``used`` 取本机「启用中的账号数」——这才是本地额度校验的口径；服务端 ``used``
@@ -227,7 +234,8 @@ def get_account_usage(*, accounts: list[dict[str, Any]] | None = None) -> dict[s
     ``accounts`` 让调用方把已经算好的合并视图传进来，一次界面刷新不必合并三遍。
     """
     refresh_entitlement()
-    limit = get_account_limit()
+    quota = resolve_account_quota()
+    limit = quota["limit"]
     used = 0
     plan_label = ""
     expire_at = None
@@ -247,12 +255,29 @@ def get_account_usage(*, accounts: list[dict[str, Any]] | None = None) -> dict[s
     except Exception as e:  # noqa: BLE001
         _warn(f"统计已用账号数失败：{e}")
         used = 0
+    # 额度三态要能被界面区分：limit=None 有两种含义（未知 / 不限），
+    # 光靠一个字段说不清，界面上「不限账号」和「离线取不到额度」是两回事。
+    days_left: int | None = None
+    expire_iso = ""
+    if not ent.get("timeUnlimited"):
+        # expireAt 线上是 epoch 毫秒、src 那代是 ISO 字符串，_parse_iso 两种都吃
+        from .license_client import _parse_iso
+
+        dt = _parse_iso(expire_at)
+        if dt:
+            expire_iso = dt.isoformat()
+            days_left = max((dt - datetime.now(timezone.utc)).days, 0)
     return {
         "limit": limit,
+        "quotaKnown": quota["known"],
+        "quotaSource": quota["source"],
         "used": used,
         "remain": None if limit is None else max(limit - used, 0),
         "planLabel": plan_label,
         "expireAt": expire_at,
+        "expireAtIso": expire_iso,
+        "expireDaysLeft": days_left,
+        "timeUnlimited": bool(ent.get("timeUnlimited")),
         "contactVerified": ent.get("contactVerified"),
         "contactEmail": ent.get("contactEmail") or "",
     }
@@ -397,6 +422,47 @@ def account_identity_key(account: dict[str, Any]) -> str:
     return f"{provider}:{uid}"
 
 
+class QuotaBlocked(ValueError):
+    """额度不足 / 额度未知导致的入库拒绝。
+
+    继承 ``ValueError`` 是有意的：现存 13 个调用点里有若干 ``except ValueError``
+    与批量入库的兜底逻辑，换成全新基类会让它们静默失效。
+    界面要的是能直接渲染的结构，不是让人去 parse 中文句子 —— 所以带上 code/seats/used。
+    """
+
+    def __init__(self, code: str, message: str, *, seats: int | None = None, used: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.seats = seats
+        self.used = used
+
+    def as_result(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": self.code,
+            "message": str(self),
+            "seats": self.seats,
+            "used": self.used,
+        }
+
+
+def try_upsert_account(account: dict[str, Any]) -> dict[str, Any]:
+    """给界面与批量路径用的入库：把额度拦截转成结构化结果，**不抛异常**。
+
+    ``upsert_account`` 返回的是账号本身，被额度拦住时抛 :class:`QuotaBlocked`；
+    调用点分散在 13 处（含批量采集循环），逐个 try/except 既啰嗦又容易漏 ——
+    漏掉的那处会让整个批量任务中途 abort，留下「一半入库」的脏状态。
+    这里统一成 ``{ok, account | code, message, seats, used}``，批量循环逐条收集即可。
+    """
+    try:
+        return {"ok": True, "message": "", "account": upsert_account(account)}
+    except QuotaBlocked as exc:
+        return exc.as_result()
+    except Exception as exc:  # noqa: BLE001 - 存储层异常同样转成结果，不能冒到 JS 侧
+        _warn(f"账号入库失败：{exc}")
+        return {"ok": False, "code": "STORE_FAILED", "message": f"账号入库失败：{exc}"}
+
+
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
     # 合并视图和代挂额度都要打 HTTP，必须在锁外先取好；
     # 持锁期间只做本地文件的读写，否则一次入库会把所有界面/调度线程一起挂住。
@@ -436,28 +502,45 @@ def _upsert_account(account: dict[str, Any], server_rows: list[dict[str, Any]] |
         account_id = str(uuid.uuid4())
     account["id"] = account_id
 
-    account_limit = get_account_limit()
+    quota = resolve_account_quota()
+    account_limit = quota["limit"] if quota["known"] else None
     if idx >= 0:
         was_enabled = bool(accounts[idx].get("enabled", True))
         merged = {**accounts[idx], **account}
         accounts[idx] = merged
         account = merged
         # 从禁用切回启用也要占用额度（额度按「启用中的账号数」计）
+        # 额度未知时**不拦**：这是一条已经存在的记录，用户只是把它重新打开
         if not was_enabled and bool(merged.get("enabled", True)) and account_limit is not None:
             enabled_now = _enabled_count(accounts)
             if enabled_now > account_limit:
-                raise ValueError(
+                raise QuotaBlocked(
+                    "QUOTA_EXCEEDED",
                     f"超出账号数量上限：启用后将有 {enabled_now} 个，"
-                    f"当前套餐仅支持 {account_limit} 个（升级套餐可增加）"
+                    f"当前套餐仅支持 {account_limit} 个（升级套餐可增加）",
+                    seats=account_limit,
+                    used=enabled_now,
                 )
     else:
         # 停用账号不占额度（额度按「启用中的账号数」计），否则额度满时连备份都存不进
-        if account_limit is not None and bool(account.get("enabled", True)):
+        if bool(account.get("enabled", True)):
+            if not quota["known"]:
+                # 拿不到额度 ≠ 不限：拒绝新增，但上面那条「已有记录」的路径照常放行
+                raise QuotaBlocked(
+                    "QUOTA_UNKNOWN",
+                    "暂时取不到套餐额度（离线或授权服务未响应），无法确认还能挂几个号。"
+                    "已有账号不受影响；请联网后重试，或在设置页重新激活卡密。",
+                    seats=None,
+                    used=_enabled_count(accounts),
+                )
             enabled_now = _enabled_count(accounts)
-            if enabled_now >= account_limit:
-                raise ValueError(
+            if account_limit is not None and enabled_now >= account_limit:
+                raise QuotaBlocked(
+                    "QUOTA_EXCEEDED",
                     f"超出账号数量上限：当前已启用 {enabled_now} 个，"
-                    f"套餐上限 {account_limit} 个（升级套餐或先停用部分账号）"
+                    f"套餐上限 {account_limit} 个（升级套餐或先停用部分账号）",
+                    seats=account_limit,
+                    used=enabled_now,
                 )
         accounts.append(account)
     
