@@ -34,10 +34,13 @@ from .scheduler import (
     AutoSyncer,
     DailyScheduler,
     credit_slot_busy,
+    refresh_account_credits,
     refresh_server_credentials,
+    release_credit_slot,
     run_local_all,
     run_workbuddy_tasks,
     run_workbuddy_tasks_all,
+    try_acquire_credit_slot,
 )
 from .settings import load_settings, save_settings, settings_path
 from .traework_watcher import TraeWorkAutoCapture
@@ -115,6 +118,14 @@ _SETTING_VALIDATORS: dict[str, Callable[[Any], tuple[bool, Any]]] = {
     "traework_auto_capture": _v_bool,
     "auto_sync": _v_bool,
     "auto_sync_minutes": _v_int_range(1, 240),
+    "schedule_hour": _v_int_range(0, 23),
+    "schedule_minute": _v_int_range(0, 59),
+    "evening_hour": _v_int_range(0, 23),
+    "evening_minute": _v_int_range(0, 59),
+    # 号与号之间的随机等待：上限 600 秒，误填一个巨大的数不能把整轮跑批挂死
+    "run_gap_min_sec": _v_int_range(0, 600),
+    "run_gap_max_sec": _v_int_range(0, 600),
+    "credit_low_threshold": _v_int_range(0, 1000000),
     "traework_user_dir": _v_text,
     "traework_ug_api_base": _v_http_url,
     "workbuddy_task_mode": _v_choice("off", "local", "server"),
@@ -297,11 +308,19 @@ class CheckinApi:
                 "traework_auto_capture": bool(self.settings.get("traework_auto_capture", True)),
                 "auto_sync": bool(self.settings.get("auto_sync", True)),
                 "auto_sync_minutes": int(self.settings.get("auto_sync_minutes") or 5),
+                "schedule_hour": int(self._setting("schedule_hour", 9) or 0),
+                "schedule_minute": int(self._setting("schedule_minute", 10) or 0),
+                "evening_hour": int(self._setting("evening_hour", 20) or 0),
+                "evening_minute": int(self._setting("evening_minute", 0) or 0),
+                "run_gap_min_sec": int(self._setting("run_gap_min_sec", 20) or 0),
+                "run_gap_max_sec": int(self._setting("run_gap_max_sec", 60) or 0),
+                "credit_low_threshold": int(self._setting("credit_low_threshold", 100) or 0),
                 "traework_user_dir": self.settings.get("traework_user_dir") or "",
                 "workbuddy_task_mode": self.settings.get("workbuddy_task_mode") or "off",
                 "workbuddy_chat_tasks": bool(self.settings.get("workbuddy_chat_tasks", True)),
             },
             "traework_watch": self.traework_watch.status(),
+            "scheduler": self.scheduler.status(),
             "license": license_info,
             "revoked": self._revoked,  # 非空 = 卡密已失效被踢出，前端弹回门禁并提示
             "accountUsage": account_store.get_account_usage(accounts=merged),
@@ -920,17 +939,73 @@ class CheckinApi:
             self._append_log(str(result.get("message") or ""))
         return result
 
-    def run_local_now(self) -> dict[str, Any]:
-        self._append_log("开始本机签到…")
+    def _find_account(self, account_id: str) -> dict[str, Any] | None:
+        if not account_id:
+            return None
+        return next(
+            (a for a in account_store.load_accounts() if str(a.get("id")) == str(account_id)), None
+        )
+
+    def run_local_now(self, account_id: str = "") -> dict[str, Any]:
+        """本机签到。``account_id`` 非空时只跑那一个号（列表行内「签到」）。"""
+        label = "本机签到"
+        if account_id:
+            account = self._find_account(account_id)
+            if account is None:
+                return {"ok": False, "message": "找不到该账号，可能已删除"}
+            if str(account.get("run_mode") or "local") != "local":
+                return {"ok": False, "message": "该账号是服务器代跑模式，本机不跑"}
+            if not account.get("enabled", True):
+                return {"ok": False, "message": "该账号已停用，先启用再签到"}
+            label = f"本机签到 {account.get('label') or account.get('id')}"
+        self._append_log(f"开始{label}…")
 
         def worker() -> None:
-            results = run_local_all(require_license=True, log=self._append_log)
-            self._append_log(f"本机签到完成，共 {len(results)} 条")
+            results = run_local_all(
+                require_license=True, log=self._append_log, account_id=str(account_id or "")
+            )
+            self._append_log(f"{label}完成，共 {len(results)} 条")
 
+        # 和整批签到共用任务名：同一批 token 并发问供应商只会换来限流
         busy = self._start_job("本机签到", worker)
         if busy:
             return busy
-        return {"ok": True, "message": "已开始本机签到"}
+        return {"ok": True, "message": f"已开始{label}"}
+
+    def refresh_account(self, account_id: str = "") -> dict[str, Any]:
+        """单个账号刷新积分（列表行内「刷新」）。"""
+        account = self._find_account(account_id)
+        if account is None:
+            return {"ok": False, "message": "找不到该账号，可能已删除"}
+        blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
+        if not (blob.get("token") or blob.get("access_token")):
+            return {"ok": False, "message": "本机没有该账号的凭证（仅服务器代跑记录），查不了积分"}
+        if self._job_running() or credit_slot_busy():
+            return {"ok": False, "busy": True, "message": "已有任务在执行（签到/登录/同步），请等待完成"}
+        label = str(account.get("label") or account.get("id"))
+
+        def worker() -> None:
+            # 抢全局积分查询槽：自动同步那一路也在问同一个号，并发只会被供应商限流
+            if not try_acquire_credit_slot():
+                self._append_log(f"积分刷新跳过 {label}：已有同步任务在执行")
+                return
+            try:
+                info = refresh_account_credits(account)
+            except Exception as exc:  # noqa: BLE001 - 后台线程里没人接异常
+                self._append_log(f"积分刷新失败 {label}：{mask_text(exc, 160)}")
+                return
+            finally:
+                release_credit_slot()
+            if info.get("ok"):
+                self._append_log(
+                    f"积分刷新 {label}：{info.get('credits') if info.get('credits') is not None else '-'}"
+                    + (f" · 连签 {info.get('streak')}" if info.get("streak") is not None else "")
+                )
+
+        busy = self._start_job("积分刷新", worker)
+        if busy:
+            return busy
+        return {"ok": True, "message": f"正在刷新 {label} 的积分"}
 
     def sync_now(self) -> dict[str, Any]:
         """「立即同步」：拉一次服务器代跑状态 + 查本机账号积分。"""
@@ -1241,9 +1316,11 @@ def main() -> None:
     webview.create_window(
         title=f"积分签到工具  v{__version__}",
         url=url,
-        width=980,
-        height=720,
-        min_size=(820, 600),
+        # 侧栏占了 ~200px，账号表 9 列要 ~900px 才不横向滚；
+        # 980 宽的默认窗口一进「账号管理」就得拖着横向滚动条看操作列。
+        width=1180,
+        height=780,
+        min_size=(980, 640),
         resizable=True,
         text_select=True,
         background_color="#eef3fa",

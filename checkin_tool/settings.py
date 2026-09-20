@@ -30,6 +30,12 @@ def default_settings() -> dict[str, Any]:
         "evening_minute": 0,
         "schedule_jitter_sec": 120,
         "schedule_window_sec": 7200,
+        # 账号间随机签到间隔：原来硬编码 0.8~1.8 秒，等于所有号在同一秒内连续问供应商，
+        # 风控特征明显；给一个可配的区间，默认 20~60 秒。
+        "run_gap_min_sec": 20,
+        "run_gap_max_sec": 60,
+        # 积分低于该值时列表橙色提醒（仅 WorkBuddy 有积分口径）
+        "credit_low_threshold": 100,
         "auto_schedule": True,
         # 打开程序即同步，之后定时拉服务器状态与本机账号积分（界面 30 秒重读视图）
         "auto_sync": True,

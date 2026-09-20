@@ -314,7 +314,26 @@ def refresh_server_credentials(*, log: LogFn | None = None) -> list[dict[str, An
     return results
 
 
-def run_local_all(*, require_license: bool = True, log: LogFn | None = None) -> list[dict[str, Any]]:
+def _run_gap(settings: dict[str, Any]) -> float:
+    """账号之间的随机等待秒数。
+
+    原来硬编码 0.8~1.8 秒：十几个号挤在两秒内连续问供应商，风控特征太明显。
+    脏值一律钳制，上限 600 秒 —— 误填一个巨大的数不能把整轮跑批挂死。
+    """
+    try:
+        low = int(settings.get("run_gap_min_sec"))
+        high = int(settings.get("run_gap_max_sec"))
+    except (TypeError, ValueError):
+        low, high = 20, 60
+    low = min(max(low, 0), 600)
+    high = min(max(high, low), 600)
+    return random.uniform(low, high) if high > low else float(low)
+
+
+def run_local_all(
+    *, require_license: bool = True, log: LogFn | None = None, account_id: str = ""
+) -> list[dict[str, Any]]:
+    """本机跑一轮签到。``account_id`` 非空时只跑那一个号（界面行内「签到」）。"""
     settings = load_settings()
     if require_license:
         ok, msg = ensure_licensed(settings, force_online=True)
@@ -322,12 +341,23 @@ def run_local_all(*, require_license: bool = True, log: LogFn | None = None) -> 
             _log(log, f"卡密无效：{msg}")
             return [{"ok": False, "message": msg}]
 
+    rows = account_store.load_accounts()
+    if account_id:
+        rows = [r for r in rows if str(r.get("id")) == str(account_id)]
     results: list[dict[str, Any]] = []
-    for account in account_store.load_accounts():
+    first = True
+    for account in rows:
         if not account.get("enabled", True):
             continue
         if str(account.get("run_mode") or "local") != "local":
             continue
+        # 间隔只加在「号与号之间」：第一个号直接跑，最后一个号跑完不再白等；
+        # 每一对之间重新摇一次，整批共用一个随机数等于没随机。
+        if not first:
+            gap = _run_gap(settings)
+            if gap > 0:
+                time.sleep(gap)
+        first = False
         _log(log, f"签到 {account.get('provider')} / {account.get('label') or account.get('id')} ...")
         label = account.get("label") or account.get("id") or account.get("provider")
         try:
@@ -336,7 +366,6 @@ def run_local_all(*, require_license: bool = True, log: LogFn | None = None) -> 
             result = {"ok": False, "provider": account.get("provider"), "message": f"{label} 执行异常: {mask_text(exc, 160)}"}
         results.append(result)
         _log(log, result.get("message") or str(result))
-        time.sleep(0.8 + random.random())
         # WorkBuddy 成长中心任务（在本机签到之后顺带做，幂等）
         if settings.get("workbuddy_task_mode") == "local" and str(account.get("provider")) == "workbuddy":
             try:
@@ -363,6 +392,52 @@ class DailyScheduler:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def status(self) -> dict[str, Any]:
+        """界面状态灯：线程是否活着 + 自动签到是否开 + 下一个到点窗口。
+
+        「已暂停」和「调度线程静默死了」以前在界面上长得一模一样（都显示一切正常），
+        用户只能靠「今天怎么没签到」反推。
+        """
+        try:
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - 状态读取不能反过来把界面带崩
+            settings = {}
+        return {
+            "enabled": bool(settings.get("auto_schedule", True)),
+            "running": bool(self._thread and self._thread.is_alive()),
+            "nextAt": self._next_slot(settings),
+        }
+
+    @staticmethod
+    def _next_slot(settings: dict[str, Any]) -> str:
+        """下一个还没过的签到窗口，纯展示用；脏配置退回默认值，越界的直接跳过。"""
+        try:
+            slots = [
+                (
+                    int(settings.get("schedule_hour") or 9),
+                    int(settings.get("schedule_minute") or 10),
+                    "早签",
+                )
+            ]
+            if settings.get("evening_schedule", True):
+                slots.append(
+                    (
+                        int(settings.get("evening_hour") or 20),
+                        int(settings.get("evening_minute") or 0),
+                        "补漏",
+                    )
+                )
+        except (TypeError, ValueError):
+            return ""
+        now = datetime.now()
+        for hour, minute, label in sorted(slots):
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                continue
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target > now:
+                return f"{label} {target.strftime('%H:%M')}"
+        return "今日窗口已过"
 
     def _slot_key(self, day: str, slot: str) -> str:
         return f"{day}:{slot}"
