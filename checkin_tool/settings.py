@@ -9,6 +9,51 @@ from .secure_storage import load_json, save_json
 
 SETTINGS_FILE = data_root() / "settings.json"
 
+GAP_SEC_MIN = 0
+GAP_SEC_MAX = 600
+GAP_SEC_DEFAULT = (20, 60)
+
+# 设置项区间 → 默认值：网页端 collectSettings 与 tkinter 端各写一份钳制
+# 就会漂移（一边把 0 当「没填」退回默认值，另一边允许 0）。两条前端都调这里。
+_INT_FIELDS: dict[str, tuple[int, int, int]] = {
+    "auto_sync_minutes": (1, 240, 5),
+    "schedule_hour": (0, 23, 9),
+    "schedule_minute": (0, 59, 10),
+    "evening_hour": (0, 23, 20),
+    "evening_minute": (0, 59, 0),
+    "run_gap_min_sec": (GAP_SEC_MIN, GAP_SEC_MAX, GAP_SEC_DEFAULT[0]),
+    "run_gap_max_sec": (GAP_SEC_MIN, GAP_SEC_MAX, GAP_SEC_DEFAULT[1]),
+    "credit_low_threshold": (0, 1_000_000, 100),
+}
+
+
+def parse_int_field(raw: Any, key: str) -> int:
+    """按 ``_INT_FIELDS`` 的区间读一个输入框的值。
+
+    空 / 非数字回退默认值；``0`` 是合法值（间隔 0 秒、阈值 0 = 关闭提醒），
+    不能用 ``Number(v) || default`` 那类写法把它吃掉。
+    """
+    low, high, default = _INT_FIELDS[key]
+    text = str(raw if raw is not None else "").strip()
+    if not text:
+        return default
+    try:
+        value = int(float(text))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def ordered_gap(lo_raw: Any, hi_raw: Any) -> tuple[int, int]:
+    """账号间随机间隔：先各自钳制，再把填反了的区间换回来。
+
+    跑批时 ``scheduler._run_gap`` 也会兜底，但落盘就存反区间的话，
+    另一个前端回显时会显示成「最小 60 秒、最大 20 秒」这种鬼样子。
+    """
+    low = parse_int_field(lo_raw, "run_gap_min_sec")
+    high = parse_int_field(hi_raw, "run_gap_max_sec")
+    return (low, high) if low <= high else (high, low)
+
 
 def default_settings() -> dict[str, Any]:
     return {

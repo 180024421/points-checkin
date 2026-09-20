@@ -15,6 +15,7 @@ from . import (
     account_store,
     autostart,
     credential_store,
+    delegate,
     license_client,
     server_client,
     vault,
@@ -42,7 +43,7 @@ from .scheduler import (
     run_workbuddy_tasks_all,
     try_acquire_credit_slot,
 )
-from .settings import load_settings, save_settings, settings_path
+from .settings import load_settings, ordered_gap, save_settings, settings_path
 from .traework_watcher import TraeWorkAutoCapture
 
 
@@ -461,6 +462,13 @@ class CheckinApi:
             updates[key] = value_or_msg
         if not updates:
             return {"ok": True, "message": "无改动"}
+        # 区间填反了（最小 60 / 最大 20）在跑批时能被 _run_gap 兜住，但落盘就该是有序的：
+        # 另一个前端回显时不认得「反区间」，会照原样显示。规则放在 settings 里和 tkinter 共用。
+        if "run_gap_min_sec" in updates or "run_gap_max_sec" in updates:
+            merged = {**self._settings_snapshot(), **updates}
+            updates["run_gap_min_sec"], updates["run_gap_max_sec"] = ordered_gap(
+                merged.get("run_gap_min_sec"), merged.get("run_gap_max_sec")
+            )
         self._set_settings(updates)
         with self._settings_lock:
             snapshot = dict(self.settings)
@@ -1042,24 +1050,11 @@ class CheckinApi:
         targets = [a for a in accounts if (not account_id or str(a.get("id")) == str(account_id))]
 
         def worker() -> None:
-            for account in targets:
-                blob = account.get("token_blob") or {}
-                if not blob.get("token") and not blob.get("access_token"):
-                    self._append_log(f"跳过无 token 账号 {account.get('id')}")
-                    continue
-                account["run_mode"] = "server"
-                if str(account.get("provider")) == "workbuddy":
-                    # 告诉服务器：这个账号代跑时要不要顺带做成长任务
-                    account["task_enabled"] = self.settings.get("workbuddy_task_mode") == "server"
-                stored = account_store.try_upsert_account(account)
-                if not stored.get("ok"):
-                    # 批量路径：一条失败只跳过这一条。异常冒出去会让整批中断，
-                    # 前面已经改过 run_mode 的账号就停在半完成状态没人收尾。
-                    self._append_log(f"账号 {account.get('id')} 未能标记为代跑：{stored.get('message')}")
-                    continue
-                result = server_client.sync_server_blob(account, log=self._append_log, force=True)
-                if not result:
-                    self._append_log(f"上传代跑 {account.get('provider')}: 无可用凭证，已跳过")
+            delegate.upload_delegate_accounts(
+                targets,
+                task_enabled=self._settings_snapshot().get("workbuddy_task_mode") == "server",
+                log=self._append_log,
+            )
 
         busy = self._start_job("代跑上传", worker)
         if busy:
@@ -1128,86 +1123,12 @@ class CheckinApi:
         return {"ok": True, "message": "正在执行 WorkBuddy 成长任务"}
 
     def replace_server_account(self, old_account_id: str, new_account_id: str) -> dict[str, Any]:
+        """更换服务器代跑账号：实现与 tkinter 端共用 ``checkin_tool.delegate``。"""
+
         self._bind_hint()
-        self._append_log(f"尝试更换服务器代跑账号：旧账号ID={old_account_id}, 新账号ID={new_account_id}")
-        
-        # 1. 查找并验证旧账号
-        all_accounts = account_store.load_accounts()
-        old_account = next((a for a in all_accounts if str(a.get("id")) == str(old_account_id)), None)
-        if not old_account:
-            return {"ok": False, "message": f"未找到旧账号 {old_account_id}"}
-        if old_account.get("run_mode") != "server":
-            return {"ok": False, "message": f"旧账号 {old_account_id} 不是服务器代跑模式，无法更换"}
-
-        # 2. 查找并验证新账号
-        new_account = next((a for a in all_accounts if str(a.get("id")) == str(new_account_id)), None)
-        if not new_account:
-            return {"ok": False, "message": f"未找到新账号 {new_account_id}"}
-        if new_account.get("run_mode") == "server":
-            return {"ok": False, "message": f"新账号 {new_account_id} 已是服务器代跑模式，请选择本地账号进行更换"}
-        
-        # 3. 删除服务器上的旧账号（用服务端自增 id，本机 uuid 服务端认不出）
-        old_server_id = old_account.get("server_account_id") or (
-            str(old_account_id).removeprefix("srv:") if str(old_account_id).startswith("srv:") else ""
+        return delegate.replace_server_account(
+            old_account_id, new_account_id, log=self._append_log
         )
-        if not old_server_id:
-            # 没有服务端 id 就绝不能拿本机 uuid 去删：服务端按自增主键查，只会误报或漏删
-            return {"ok": False, "message": f"旧账号 {old_account_id} 没有服务器代跑记录 id，无法更换"}
-        try:
-            self._append_log(f"正在删除服务器上的旧代跑记录: {old_server_id}")
-            server_del_result = server_client.delete_server_account(old_server_id)
-            if not server_del_result.get("ok"):
-                self._append_log(f"删除服务器旧账号 {old_server_id} 失败: {server_del_result.get('message')}")
-                return {"ok": False, "message": f"删除服务器旧账号失败: {server_del_result.get('message')}"}
-            # 旧记录已经不代跑了：本机那一行改回本机模式，否则合并视图会立刻把它标回 server
-            if old_account.get("source") != "server":
-                old_account["run_mode"] = "local"
-                old_account.pop("server_account_id", None)
-                # 纯状态回写：写不进只记日志，不能因为本地存储失败就中断更换流程
-                # ——服务器上的旧记录此刻已经删掉了。
-                rollback = account_store.try_upsert_account(old_account)
-                if not rollback.get("ok"):
-                    self._append_log(f"旧账号 {old_account_id} 本地状态回写失败：{rollback.get('message')}")
-        except Exception as exc:
-            self._append_log(f"调用服务器删除旧账号接口异常: {exc}")
-            return {"ok": False, "message": f"调用服务器删除旧账号接口异常: {exc}"}
-
-        # 4. 上传新的账号到服务器并更新本地状态
-        try:
-            self._append_log(f"正在上传新账号 {new_account_id} 到服务器")
-            # 将新账号设置为服务器模式
-            new_account["run_mode"] = "server"
-            # 更新本地 account_store，因为它现在是服务器模式了。
-            # 这一步是后面上传的前提：本机没落成 server 就不要往服务器推，
-            # 否则会出现「服务器在代跑、本机界面看不到」的分裂状态。
-            switched = account_store.try_upsert_account(new_account)
-            if not switched.get("ok"):
-                new_account["run_mode"] = "local"
-                return {"ok": False, **switched}
-            
-            # 同步到服务器
-            server_sync_result = server_client.sync_server_blob(new_account, log=self._append_log, force=True)
-            if server_sync_result is None:
-                new_account["run_mode"] = "local"
-                account_store.try_upsert_account(new_account)
-                return {"ok": False, "message": f"新账号 {new_account_id} 没有可用 token，无法上传代跑"}
-            if not server_sync_result.get("ok"):
-                # 上传失败就把本机这行退回本机模式，别留一个「显示在代跑、其实服务器没有」的状态
-                new_account["run_mode"] = "local"
-                account_store.try_upsert_account(new_account)
-                reason = server_sync_result.get("message") or "未知错误"
-                self._append_log(f"新账号 {new_account_id} 上传服务器失败: {reason}")
-                return {"ok": False, "message": f"新账号上传服务器失败: {reason}"}
-            
-            self._append_log(f"账号 {old_account_id} 已成功更换为 {new_account_id} 并上传至服务器。")
-            return {"ok": True, "message": f"账号 {old_account_id} 已成功更换为 {new_account_id}"}
-
-        except Exception as exc:
-            self._append_log(f"上传新账号到服务器异常: {exc}")
-            # 同样，如果上传失败，尝试回滚本地账号为本地模式
-            new_account["run_mode"] = "local"
-            account_store.try_upsert_account(new_account)
-            return {"ok": False, "message": f"上传新账号到服务器异常: {exc}"}
 
     def _get_replacement_suggestion(self, new_local_account: dict[str, Any]) -> dict[str, Any] | None:
         """
