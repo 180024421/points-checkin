@@ -206,42 +206,167 @@
       background: rgba(255, 255, 255, .14)
     }
 
-    /* 标签栏 */
-    .tabbar {
-      flex: 0 0 auto;
-      background: #fff;
-      border-bottom: 1px solid var(--line);
-      padding: 0 20px;
+    /* 主体：左侧导航 + 内容区 */
+    .body {
+      flex: 1 1 auto;
       display: flex;
-      align-items: center;
-      gap: 4px;
+      min-height: 0;
+    }
+
+    .sidebar {
+      flex: 0 0 198px;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      overflow: hidden;
+    }
+
+    .nav {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      padding: 10px 9px 0;
+      display: grid;
+      gap: 2px;
+      align-content: start;
+    }
+
+    .nav-cap {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: .07em;
+      color: var(--muted);
+      padding: 7px 10px 3px;
     }
 
     .tab {
       appearance: none;
-      border: none;
+      border: 1px solid transparent;
       background: none;
       cursor: pointer;
-      padding: 12px 15px 11px;
-      font-size: 13px;
+      text-align: left;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 12.5px;
       font-weight: 600;
-      color: var(--muted);
-      border-bottom: 2px solid transparent;
-      transition: color .15s, border-color .15s;
+      color: var(--text-2);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tab::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .3;
+      flex: 0 0 auto;
     }
 
     .tab:hover {
-      color: var(--text-2)
+      background: var(--panel-soft);
+      color: var(--text)
     }
 
     .tab.active {
+      background: var(--brand-soft);
+      border-color: #cfe6f9;
       color: var(--brand);
-      border-bottom-color: var(--brand)
+    }
+
+    .tab.active::before {
+      opacity: 1
+    }
+
+    /* 导航底部：平台筛选 + 运行状态 */
+    .side-filter {
+      flex: 0 0 auto;
+      border-top: 1px solid var(--line);
+      padding: 11px 12px;
+      margin: 6px 0 0;
+    }
+
+    .seg {
+      display: flex;
+      gap: 4px;
+    }
+
+    .seg button {
+      flex: 1 1 0;
+      padding: 5px 0;
+      font-size: 11.5px;
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .seg button.active {
+      background: var(--brand);
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(10, 111, 194, .24);
+    }
+
+    .side-foot {
+      flex: 0 0 auto;
+      border-top: 1px solid var(--line);
+      padding: 11px 13px 13px;
+      display: grid;
+      gap: 6px;
+      background: var(--panel-soft);
+    }
+
+    .side-foot .st {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      font-weight: 650;
+      color: var(--text-2);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    .dot.ok {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px var(--ok-soft);
+    }
+
+    .dot.warn {
+      background: var(--warn);
+      box-shadow: 0 0 0 3px var(--warn-soft);
+    }
+
+    .side-foot .kv {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .side-foot .kv b {
+      font-weight: 650;
+      color: var(--text-2);
+      font-family: var(--mono);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /* 内容区 */
     .content {
       flex: 1 1 auto;
+      min-width: 0;
       min-height: 0;
       overflow-y: auto;
       padding: 16px 20px
@@ -299,7 +424,8 @@
     .card-head h2 {
       font-size: 13px;
       font-weight: 650;
-      letter-spacing: .2px
+      letter-spacing: .2px;
+      white-space: nowrap
     }
 
     .card-head .spacer {
@@ -323,6 +449,31 @@
 
     .muted {
       color: var(--muted)
+    }
+
+    .help-step {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 10px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 12.5px;
+      color: var(--text-2);
+      line-height: 1.65;
+    }
+
+    .help-step:last-child {
+      border-bottom: none
+    }
+
+    .help-step b {
+      color: var(--brand);
+      font-weight: 700;
+      white-space: nowrap
+    }
+
+    .card p.hint b {
+      color: var(--text-2)
     }
 
     .row {
@@ -354,6 +505,23 @@
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 12px
+    }
+
+    .grid4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    @media (max-width:900px) {
+      .sidebar {
+        flex-basis: 160px
+      }
+
+      .grid4 {
+        grid-template-columns: repeat(2, 1fr)
+      }
     }
 
     @media (max-width:820px) {
@@ -730,6 +898,121 @@
       color: var(--text-2)
     }
 
+    .table-wrap {
+      overflow-x: auto
+    }
+
+    .table td.ops,
+    .table th.ops {
+      text-align: right;
+      white-space: nowrap
+    }
+
+    .table td.ops .btns {
+      display: inline-flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: flex-end
+    }
+
+    .table td.plain:first-child {
+      font-family: var(--font);
+      font-size: 12.5px;
+      color: var(--text)
+    }
+
+    .table .sub {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: var(--mono);
+      margin-top: 2px;
+      word-break: break-all
+    }
+
+    .table .num {
+      font-family: var(--mono);
+      font-weight: 650
+    }
+
+    /* 积分低于阈值：只标色不弹窗，参考竞品「列表橙色提醒」 */
+    .table .num.low {
+      color: var(--warn)
+    }
+
+    .table .res {
+      max-width: 230px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-2)
+    }
+
+    .table .res.bad {
+      color: var(--danger)
+    }
+
+    .table select {
+      padding: 5px 6px;
+      font-size: 12px;
+      width: 100%;
+      max-width: 76px;
+      min-width: 68px
+    }
+
+    .tag.warn {
+      background: var(--warn-soft);
+      color: var(--warn);
+      border-color: #f0dcb4
+    }
+
+    /* 账号表：9 列必须定宽，否则「积分余额」「连签」被挤成两行、
+       操作区的「删除」掉到第二行把每一行撑到两倍高。
+       可用宽要按「卡片内宽」算：1180 窗口 - 侧栏 198 - 内容内边距 40
+       - 纵向滚动条 17 - 卡片内边距 38 ≈ 887，定宽列合计留到 860，
+       剩下的给「账号」列自己长，窗口再宽也是它吸收。 */
+    #acc-table {
+      table-layout: fixed;
+      min-width: 860px
+    }
+
+    #acc-table th {
+      white-space: nowrap
+    }
+
+    #acc-table th:nth-child(1) { width: 52px }
+
+    #acc-table th:nth-child(3) { width: 64px }
+
+    #acc-table th:nth-child(4) { width: 38px }
+
+    #acc-table th:nth-child(5) { width: 78px }
+
+    #acc-table th:nth-child(6) { width: 74px }
+
+    #acc-table th:nth-child(7) { width: 150px }
+
+    #acc-table th:nth-child(8) { width: 80px }
+
+    #acc-table th:nth-child(9) { width: 204px }
+
+    #acc-table td {
+      padding-top: 7px;
+      padding-bottom: 7px
+    }
+
+    #acc-table td.ops .btns {
+      flex-wrap: nowrap
+    }
+
+    #acc-table td.ops button.sm {
+      padding: 4px 8px;
+      font-size: 11.5px
+    }
+
+    .card p.hint+.hint {
+      margin-top: 6px
+    }
+
     /* 日志 */
     .logbar-wrap {
       flex: 0 0 auto;
@@ -983,15 +1266,36 @@
       </div>
     </header>
 
-    <nav class="tabbar">
-      <button class="tab active" data-tab="home">概览</button>
-      <button class="tab" data-tab="accounts">账号</button>
-      <button class="tab" data-tab="today">今日</button>
-      <button class="tab" data-tab="credits">积分</button>
-      <button class="tab" data-tab="settings">设置</button>
-    </nav>
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="nav">
+          <div class="nav-cap">导航</div>
+          <button class="tab active" data-tab="home">概览</button>
+          <button class="tab" data-tab="accounts">账号管理</button>
+          <button class="tab" data-tab="today">今日签到</button>
+          <button class="tab" data-tab="credits">签到记录</button>
+          <div class="nav-cap">配置</div>
+          <button class="tab" data-tab="checkin">签到设置</button>
+          <button class="tab" data-tab="settings">系统设置</button>
+          <button class="tab" data-tab="help">使用说明</button>
+        </nav>
+        <div class="side-filter">
+          <div class="nav-cap" style="padding-left:0;padding-top:0">平台筛选</div>
+          <div class="seg" id="provider-filter">
+            <button class="active" data-pf="">全部</button>
+            <button data-pf="traework">TRAE</button>
+            <button data-pf="workbuddy">WB</button>
+          </div>
+        </div>
+        <div class="side-foot">
+          <div class="st"><span class="dot" id="sched-dot"></span><span id="sched-text">状态检测中</span></div>
+          <div class="kv"><span>下次签到</span><b id="sched-next">—</b></div>
+          <div class="kv"><span>今日已签</span><b id="sched-today">—</b></div>
+          <div class="kv"><span>版本</span><b id="side-ver">—</b></div>
+        </div>
+      </aside>
 
-    <main class="content">
+      <main class="content">
       <!-- 概览 -->
       <section class="page active" id="page-home">
         <div class="grid3" id="home-stats">
@@ -1034,31 +1338,79 @@
         </div>
       </section>
 
-      <!-- 账号 -->
+      <!-- 账号管理 -->
       <section class="page" id="page-accounts">
+        <div class="grid4" id="acc-stats">
+          <div class="stat">
+            <div class="k">账号总数</div>
+            <div class="v">—</div>
+          </div>
+          <div class="stat ok">
+            <div class="k">今日已签</div>
+            <div class="v">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">今日待签</div>
+            <div class="v">—</div>
+          </div>
+          <div class="stat warn">
+            <div class="k">异常 / 过期</div>
+            <div class="v">—</div>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-head"><span class="bar"></span>
-            <h2>账号操作</h2>
+            <h2>导入与跑批</h2>
+            <div class="spacer"></div>
+            <span class="hint" id="acc-filter-hint">全部平台</span>
+            <button class="sm primary" id="btn-run-all-2">立即全部签到</button>
           </div>
           <div class="row">
-            <button class="sm" id="btn-import-cred-2">导入账密</button>
+            <button class="sm" id="btn-cap-wb-2">从客户端导入 WorkBuddy</button>
+            <button class="sm" id="btn-cap-tw-2">从客户端导入 TraeWork</button>
+            <button class="sm" id="btn-import-cred-2">账密导入</button>
             <button class="sm" id="btn-login-all-2">统一登录</button>
-            <button class="sm" id="btn-cap-wb-2">采集 WorkBuddy</button>
-            <button class="sm" id="btn-cap-tw-2">采集 TraeWork</button>
-            <button class="sm" id="btn-paste-tw-2">粘贴 token</button>
+            <button class="sm" id="btn-paste-tw-2">粘贴 Trae token</button>
             <button class="sm" id="btn-upload">上传代跑</button>
             <button class="sm" id="btn-sync-server">同步代跑凭证</button>
             <button class="sm" id="btn-wb-tasks">执行 WorkBuddy 任务</button>
           </div>
+          <p class="hint" style="margin-top:9px">账号之间按「签到设置」里的随机间隔逐个执行，避免同一秒并发打供应商被风控。积分低于阈值的账号会在列表里标橙。</p>
         </div>
+
         <div class="card">
           <div class="card-head"><span class="bar"></span>
             <h2>账号列表</h2>
+            <div class="spacer"></div>
+            <button class="sm" id="btn-acc-refresh-all">刷新全部积分</button>
           </div>
-          <div class="list" id="acc-list">
-            <div class="empty">暂无账号</div>
+          <div class="table-wrap">
+            <table class="table" id="acc-table">
+              <thead>
+                <tr>
+                  <th>平台</th>
+                  <th>账号</th>
+                  <th>积分余额</th>
+                  <th>连签</th>
+                  <th>今日状态</th>
+                  <th>Token</th>
+                  <th>最近结果</th>
+                  <th>模式</th>
+                  <th class="ops">操作</th>
+                </tr>
+              </thead>
+              <tbody id="acc-body">
+                <tr>
+                  <td colspan="9">
+                    <div class="empty">暂无账号</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
+
         <div class="card">
           <div class="card-head"><span class="bar"></span>
             <h2>已存账密</h2>
@@ -1095,7 +1447,7 @@
             <h2>积分记录</h2>
             <div class="spacer"></div>
             <!-- 新增账号筛选器 -->
-            <select id="credit-account-filter" style="margin-right: 10px;">
+            <select id="credit-account-filter" style="margin-right: 10px; max-width: 260px;">
               <option value="">所有账号</option>
               <!-- 账号选项将由JS动态填充 -->
             </select>
@@ -1122,7 +1474,77 @@
         </div>
       </section>
 
-      <!-- 设置 -->
+      <!-- 签到设置 -->
+      <section class="page" id="page-checkin">
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>自动签到</h2>
+            <div class="spacer"></div>
+            <label class="chk"><input type="checkbox" id="set-auto"> 开启每日自动签到</label>
+          </div>
+          <div class="row gap-md" style="align-items:center">
+            <span class="label" style="margin:0">每日签到时间</span>
+            <input type="number" id="set-sched-hour" min="0" max="23" style="max-width:72px">
+            <span class="muted">:</span>
+            <input type="number" id="set-sched-min" min="0" max="59" style="max-width:72px">
+            <span class="hint">错过会自动补签</span>
+          </div>
+          <div class="row gap-md" style="align-items:center;margin-top:10px">
+            <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
+            <input type="number" id="set-ev-hour" min="0" max="23" style="max-width:72px">
+            <span class="muted">:</span>
+            <input type="number" id="set-ev-min" min="0" max="59" style="max-width:72px">
+            <span class="hint">到点仍未签的账号再跑一次</span>
+          </div>
+          <p class="hint" style="margin-top:9px">实际执行时间在设定值之后 0~2 分钟内随机触发一次，避开整点；窗口内没赶上还会在晚窗补。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>节奏与提醒</h2>
+          </div>
+          <div class="row gap-md" style="align-items:center">
+            <span class="label" style="margin:0">账号间随机签到间隔</span>
+            <input type="number" id="set-gap-min" min="0" max="600" style="max-width:88px">
+            <span class="muted">秒 ~</span>
+            <input type="number" id="set-gap-max" min="0" max="600" style="max-width:88px">
+            <span class="hint">秒（降低风控风险）</span>
+          </div>
+          <div class="row gap-md" style="align-items:center;margin-top:10px">
+            <span class="label" style="margin:0">积分不足提醒阈值</span>
+            <input type="number" id="set-low-credit" min="0" max="1000000" style="max-width:120px">
+            <span class="hint">积分（低于该值列表标橙，仅 WorkBuddy 有效）</span>
+          </div>
+          <p class="hint" style="margin-top:9px">13 个账号按 20~60 秒间隔跑一轮约 2~12 分钟；只求快可以设成 0~0 秒，但会失去错峰保护。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>成长任务与状态同步</h2>
+          </div>
+          <div class="row gap-md" style="align-items:center">
+            <span class="label" style="margin:0">WorkBuddy 成长任务</span>
+            <select id="set-wb-mode" style="max-width:220px">
+              <option value="off">关闭</option>
+              <option value="local">本机执行</option>
+              <option value="server">服务器代跑</option>
+            </select>
+            <label class="chk"><input type="checkbox" id="set-wb-chat"> 含 AI 对话任务</label>
+          </div>
+          <p class="hint">成长任务：召唤专家、模板、聊天、抽奖、盲盒、派猫猫旅行、连签兑换等，只补未完成项，重复运行不会重复领取。选「服务器代跑」后需重新点一次「上传代跑」才会生效。</p>
+          <div class="row gap-md" style="align-items:center;margin-top:10px">
+            <label class="chk"><input type="checkbox" id="set-auto-sync"> 自动同步状态与积分</label>
+            <span class="label" style="margin:0">同步间隔（分钟）</span>
+            <input type="number" id="set-sync-minutes" min="1" max="240" style="max-width:90px">
+          </div>
+          <p class="hint">开启后程序启动几秒内先同步一次，之后每隔设定间隔自动查积分；「哪些号跑了」走我们自己的服务器，界面每 30 秒自动重读，不用手点。</p>
+          <div class="row end gap-md">
+            <button class="primary" id="btn-save-schedule">保存设置</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 系统设置 -->
       <section class="page" id="page-settings">
         <div class="card">
           <div class="card-head"><span class="bar"></span>
@@ -1141,29 +1563,17 @@
           </div>
           <div class="row">
             <label class="chk"><input type="checkbox" id="set-autostart"> 开机自启</label>
-            <label class="chk"><input type="checkbox" id="set-auto"> 早晚调度</label>
-            <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
             <label class="chk"><input type="checkbox" id="set-trae-capture"> 自动捕获 Trae CN 登录</label>
           </div>
-          <div class="row gap-md" style="align-items:center">
-            <label class="chk"><input type="checkbox" id="set-auto-sync"> 自动同步状态与积分</label>
-            <span class="label" style="margin:0">积分同步间隔（分钟）</span>
-            <input type="number" id="set-sync-minutes" min="1" max="240" style="max-width:90px">
-          </div>
-          <p class="hint">开启后程序启动几秒内先同步一次，之后每隔设定间隔自动查积分；「哪些号跑了」走我们自己的服务器，界面每 30 秒自动重读，不用手点。</p>
-          <div class="row gap-md" style="align-items:center">
-            <span class="label" style="margin:0">WorkBuddy 成长任务</span>
-            <select id="set-wb-mode" style="max-width:220px">
-              <option value="off">关闭</option>
-              <option value="local">本机执行</option>
-              <option value="server">服务器代跑</option>
-            </select>
-            <label class="chk"><input type="checkbox" id="set-wb-chat"> 含 AI 对话任务</label>
-          </div>
-          <p class="hint">成长任务：召唤专家、模板、聊天、抽奖、盲盒、派猫猫旅行、连签兑换等，只补未完成项，重复运行不会重复领取。选「服务器代跑」后需重新点一次「上传代跑」才会生效。</p>
           <p class="hint" id="trae-watch-hint">Trae CN 在本机只保留「最后登录的那一个」账号，切号会覆盖旧登录态；开启后每次登录都会自动入库，无需手动采集。</p>
           <div class="row gap-md">
             <button class="sm" id="btn-diagnose-trae">检测 Trae CN 登录态</button>
+            <button class="primary" id="btn-save-system">保存本机选项</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>日志清理</h2>
           </div>
           <div class="row gap-md">
             <button class="sm" id="btn-clear-live">清理实时日志</button>
@@ -1183,7 +1593,30 @@
           </div>
         </div>
       </section>
+
+      <!-- 使用说明 -->
+      <section class="page" id="page-help">
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>五步跑通</h2>
+          </div>
+          <div class="help-step"><b>1 · 激活</b><span>系统设置里填卡密并「保存并激活」。授权与本机绑定，一台设备一个坐席。</span></div>
+          <div class="help-step"><b>2 · 导入账号</b><span>装好 WorkBuddy / Trae CN 客户端并登录，回「账号管理」点「从客户端导入」；Trae CN 开启自动捕获后登录即入库，也可粘贴 token。</span></div>
+          <div class="help-step"><b>3 · 选模式</b><span>本机 = 用这台电脑的登录态签；代跑 = 只上传 token 到服务器，关机也能签。列表每行可单独切换。</span></div>
+          <div class="help-step"><b>4 · 设节奏</b><span>「签到设置」里定每日时间、账号间随机间隔和积分告警阈值，开启自动签到后到点自己跑。</span></div>
+          <div class="help-step"><b>5 · 看结果</b><span>「今日签到」看谁签了谁没签，「签到记录」看积分流水；底部运行日志有异常会直接写出来。</span></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>常见问题</h2>
+          </div>
+          <p class="hint"><b>Token 过期</b>：列表 Token 列会标红，重新在客户端登录一次即可（Trae CN 开了自动捕获就不用手动采集）。</p>
+          <p class="hint"><b>新增账号被拒</b>：套餐坐席已满或坐席全部到期。停用不用的账号、续卡或买卡；离线取不到额度时只能照常签到，暂时不能新增。</p>
+          <p class="hint"><b>整点没跑</b>：签到时间在设定值后 0~2 分钟内随机触发，且晚窗还会补漏，不必守着。</p>
+        </div>
+      </section>
     </main>
+    </div>
 
     <!-- 公告 / 账号异常通知 -->
     <div class="modal" id="notice-modal">
@@ -1284,11 +1717,12 @@
     <div class="stat warn"><div class="k">失败</div><div class="v">${board.failed_count || 0}</div></div>`;
       $('chip-today').textContent = `今日 ${board.done_count || 0}/${board.total_enabled || 0}`;
       $('chip-today').className = 'chip ' + (board.failed_count ? 'warn' : 'off');
+      $('sched-today').textContent = `${board.done_count || 0}/${board.total_enabled || 0}`;
       const fill = (id, rows) => {
         const box = $(id);
         if (!rows || !rows.length) { box.innerHTML = '<span class="muted">无</span>'; return; }
         box.innerHTML = rows.map(r =>
-          `<div style="padding:5px 0;border-bottom:1px solid var(--line)">${esc(r.provider)} · ${esc(r.label)} · ${esc(r.today_status || '')}</div>`
+          `<div style="padding:5px 0;border-bottom:1px solid var(--line)">${esc(pLabel(r.provider))} · ${esc(r.label)} · ${esc(r.today_status || '')}</div>`
         ).join('');
       };
       fill('list-done', board.done);
@@ -1296,30 +1730,76 @@
       fill('list-failed', board.failed);
     }
 
+    // 侧栏平台筛选：'' = 全部；账号表按它过滤，统计卡跟着走（和参考稿一致）
+    let acctFilter = '';
+    const PROVIDER_LABEL = { traework: 'TRAE', workbuddy: 'WB' };
+    const pLabel = (p) => PROVIDER_LABEL[String(p || '').toLowerCase()] || String(p || '其他');
+
+    function renderAccStats(rows) {
+      let done = 0, bad = 0;
+      rows.forEach(r => {
+        if (String(r.today_status || '未跑').startsWith('已')) done += 1;
+        if (r.last_error || r.token_expired || r.today_status === '失败' || !r.enabled) bad += 1;
+      });
+      $('acc-stats').innerHTML = `
+    <div class="stat"><div class="k">账号总数</div><div class="v">${rows.length}</div></div>
+    <div class="stat ok"><div class="k">今日已签</div><div class="v">${done}</div></div>
+    <div class="stat"><div class="k">今日待签</div><div class="v">${rows.length - done}</div></div>
+    <div class="stat ${bad ? 'warn' : ''}"><div class="k">异常 / 过期</div><div class="v">${bad}</div></div>`;
+    }
+
+    function applyScheduler(s) {
+      s = s || {};
+      const dot = $('sched-dot'), txt = $('sched-text');
+      if (!s.running) { dot.className = 'dot warn'; txt.textContent = '调度已停止'; }
+      else if (!s.enabled) { dot.className = 'dot warn'; txt.textContent = '已暂停（自动签到关闭）'; }
+      else { dot.className = 'dot ok'; txt.textContent = '运行中'; }
+      $('sched-next').textContent = s.nextAt || '—';
+      $('sched-next').title = s.running ? '' : '调度线程没在跑：重启程序或检查日志';
+    }
+
     function renderAccounts(rows) {
-      const box = $('acc-list');
-      if (!rows.length) { box.innerHTML = '<div class="empty">暂无账号，请先在「概览」导入或采集</div>'; return; }
-      box.innerHTML = rows.map(r => `
-    <div class="item" data-id="${esc(r.id)}">
-      <div class="main">
-        <div class="title">
-          <span>${esc(r.provider)}</span>
-          <span class="tag">${esc(r.label || r.id)}</span>
-          ${r.source === 'server' ? '<span class="tag">仅服务器</span>' : ''}
-          ${r.token_expired ? '<span class="tag bad">已过期</span>' : ''}
-        </div>
-        <div class="meta">${r.run_mode === 'server' ? '代跑' : '本机'} · ${esc(r.today_status || '未跑')} · 积分 ${esc(r.last_credits ?? '-')} · 连签 ${esc(r.last_streak ?? '-')}</div>
-        ${r.last_error ? `<div class="err">${esc(r.last_error)}</div>` : ''}
-      </div>
-      <div class="actions">
-        ${r.source === 'server' ? '' : `
-        <button class="sm" data-act="local">本机</button>
-        <button class="sm" data-act="server">代跑</button>
-        <button class="sm" data-act="upload">上传</button>`}
-        ${r.run_mode === 'server' ? `<button class="sm" data-act="replace" data-old-id="${esc(r.id)}">更换</button>` : ''}
+      const body = $('acc-body');
+      const box = rows.filter(r => !acctFilter || String(r.provider || '').toLowerCase() === acctFilter);
+      $('acc-filter-hint').textContent = acctFilter ? `仅 ${pLabel(acctFilter)}` : '全部平台';
+      renderAccStats(box);
+      if (!box.length) {
+        body.innerHTML = `<tr><td colspan="9"><div class="empty">${rows.length ? '该平台下暂无账号，点左上「全部」看其它平台' : '暂无账号，请先导入或从客户端采集'}</div></td></tr>`;
+        return;
+      }
+      const threshold = Number((state.settings || {}).credit_low_threshold) || 0;
+      body.innerHTML = box.map(r => {
+        const st = String(r.today_status || '未跑');
+        const stCls = st === '失败' ? 'bad' : st.startsWith('已') ? 'ok' : '';
+        const onlyServer = r.source === 'server';
+        const isLocal = !onlyServer && r.run_mode !== 'server';
+        // 阈值提醒按参考稿口径：只对 WorkBuddy 生效，且积分确实取到过（null 不当 0）
+        const low = r.provider === 'workbuddy' && threshold > 0
+          && r.last_credits != null && Number(r.last_credits) < threshold;
+        const res = r.last_error || r.today_message
+          || (r.last_ok_at ? `最近成功 ${String(r.last_ok_at).slice(5, 16)}` : '—');
+        return `
+    <tr data-id="${esc(r.id)}" data-old-id="${esc(r.id)}">
+      <td class="plain"><span class="tag ${r.provider === 'workbuddy' ? 'ok' : ''}">${esc(pLabel(r.provider))}</span></td>
+      <td>
+        <div style="font-weight:650">${esc(r.label || r.id)}</div>
+        <div class="sub">${esc(r.id)}${r.source === 'server' ? ' · 仅服务器' : ''}</div>
+      </td>
+      <td><span class="num ${low ? 'low' : ''}">${esc(r.last_credits ?? '—')}</span></td>
+      <td><span class="num">${esc(r.last_streak ?? '—')}</span></td>
+      <td><span class="tag ${stCls}">${esc(st)}</span>${r.enabled ? '' : ' <span class="tag bad">已停用</span>'}</td>
+      <td>${r.token_expired ? '<span class="tag bad">已过期</span>' : `<span class="sub" style="margin-top:0">${esc(r.token_hint || '—')}</span>`}</td>
+      <td><div class="res ${r.last_error ? 'bad' : ''}" title="${esc(res)}">${esc(res)}</div></td>
+      <td>${onlyServer ? '<span class="tag">服务器</span>' : `<select data-act="mode"><option value="local"${isLocal ? ' selected' : ''}>本机</option><option value="server"${isLocal ? '' : ' selected'}>代跑</option></select>`}</td>
+      <td class="ops"><span class="btns">
+        ${isLocal ? '<button class="sm primary" data-act="checkin">签到</button>' : ''}
+        ${onlyServer ? '' : '<button class="sm" data-act="refresh">刷新</button>'}
+        ${onlyServer ? '' : '<button class="sm" data-act="upload">上传</button>'}
+        ${isLocal ? '' : '<button class="sm" data-act="replace">更换</button>'}
         <button class="sm danger" data-act="del">删除</button>
-      </div>
-    </div>`).join('');
+      </span></td>
+    </tr>`;
+      }).join('');
     }
 
     function renderCreds(rows) {
@@ -1348,7 +1828,7 @@
       if (!items.length) { body.innerHTML = '<tr><td colspan="5"><div class="empty">暂无记录</div></td></tr>'; return; }
       body.innerHTML = items.map(r => `<tr>
     <td>${esc((r.at || '').toString().slice(0, 19).replace('T', ' '))}</td>
-    <td>${esc(r.provider)}</td>
+    <td>${esc(pLabel(r.provider))}</td>
     <td>${esc(r.credits ?? '')}</td>
     <td>${esc(r.streak ?? '')}</td>
     <td>${esc(r.message)}</td>
@@ -1486,6 +1966,7 @@
 
     function applySettings(s) {
       s = s || {};
+      const int = (v, d) => (v == null || v === '' || isNaN(Number(v)) ? d : Number(v));
       $('set-base').value = s.license_base_url || '';
       $('set-card').value = s.card_code || '';
       $('gate-code').value = s.card_code || '';
@@ -1494,9 +1975,52 @@
       $('set-evening').checked = s.evening_schedule !== false;
       $('set-trae-capture').checked = s.traework_auto_capture !== false;
       $('set-auto-sync').checked = s.auto_sync !== false;
-      $('set-sync-minutes').value = s.auto_sync_minutes || 5;
+      $('set-sync-minutes').value = int(s.auto_sync_minutes, 5);
       $('set-wb-mode').value = s.workbuddy_task_mode || 'off';
       $('set-wb-chat').checked = s.workbuddy_chat_tasks !== false;
+      $('set-sched-hour').value = int(s.schedule_hour, 9);
+      $('set-sched-min').value = int(s.schedule_minute, 10);
+      $('set-ev-hour').value = int(s.evening_hour, 20);
+      $('set-ev-min').value = int(s.evening_minute, 0);
+      $('set-gap-min').value = int(s.run_gap_min_sec, 20);
+      $('set-gap-max').value = int(s.run_gap_max_sec, 60);
+      $('set-low-credit').value = int(s.credit_low_threshold, 100);
+    }
+
+    // 两个保存按钮都提交这一整包：分开存会各存一半，用户点完「保存设置」
+    // 以为改过了，其实开机自启那侧还是旧值。
+    // min/max 反填（min>max）在这里就地换成合法区间，别把越界值发给后端校验器。
+    function collectSettings() {
+      // 注意别写成 Number(v) || d：0 是合法值（间隔 0 秒 = 不等、阈值 0 = 不提醒），
+      // 那样写会把用户特意填的 0 偷偷改回默认。
+      const clamp = (id, lo, hi, d) => {
+        const raw = String($(id).value).trim();
+        if (!raw) return d;
+        const n = Number(raw);
+        return isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : d;
+      };
+      let gapMin = clamp('set-gap-min', 0, 600, 20);
+      let gapMax = clamp('set-gap-max', 0, 600, 60);
+      if (gapMin > gapMax) { const t = gapMin; gapMin = gapMax; gapMax = t; }
+      return {
+        license_base_url: $('set-base').value.trim(),
+        card_code: $('set-card').value.trim(),
+        autostart: $('set-autostart').checked,
+        auto_schedule: $('set-auto').checked,
+        evening_schedule: $('set-evening').checked,
+        traework_auto_capture: $('set-trae-capture').checked,
+        auto_sync: $('set-auto-sync').checked,
+        auto_sync_minutes: clamp('set-sync-minutes', 1, 240, 5),
+        workbuddy_task_mode: $('set-wb-mode').value,
+        workbuddy_chat_tasks: $('set-wb-chat').checked,
+        schedule_hour: clamp('set-sched-hour', 0, 23, 9),
+        schedule_minute: clamp('set-sched-min', 0, 59, 10),
+        evening_hour: clamp('set-ev-hour', 0, 23, 20),
+        evening_minute: clamp('set-ev-min', 0, 59, 0),
+        run_gap_min_sec: gapMin,
+        run_gap_max_sec: gapMax,
+        credit_low_threshold: clamp('set-low-credit', 0, 1000000, 100),
+      };
     }
 
     function applyTraeWatch(w) {
@@ -1523,8 +2047,10 @@
       const data = await call('get_bootstrap');
       state = data;
       $('ver').textContent = 'v' + (data.version || '');
+      $('side-ver').textContent = 'v' + (data.version || '');
       applyLicense(data.license || {}, data.accountUsage || {});
       applySync(data.sync || {});
+      applyScheduler(data.scheduler || {});
       // 卡密失效被踢出：只弹一次提示（后台守卫会同步停掉签到并清票据）
       const revoked = data.revoked || null;
       if (revoked && revoked.at !== revokedNotified) {
@@ -1538,7 +2064,10 @@
       applyTraeWatch(data.traework_watch || {});
       if (dataChanged('board', data.board)) renderStats(data.board || {});
       const accounts = data.accounts || [];
-      if (dataChanged('accounts', accounts)) {
+      // 阈值进 diff key：只改「积分不足提醒阈值」时账号一行没变，
+      // 但该不该标橙变了，不带进来就刷不出新配色。
+      const lowAt = (data.settings || {}).credit_low_threshold;
+      if (dataChanged('accounts', [accounts, lowAt])) {
         renderAccounts(accounts);
         // 填充积分筛选器：先记下当前选项，重建 <option> 会把选中值清成第一项
         const creditFilter = $('credit-account-filter');
@@ -1547,7 +2076,7 @@
         accounts.forEach(acc => {
           const option = document.createElement('option');
           option.value = acc.id;
-          option.textContent = `${acc.provider} - ${acc.label || acc.id}`;
+          option.textContent = `${pLabel(acc.provider)} - ${acc.label || acc.id}`;
           creditFilter.appendChild(option);
         });
         creditFilter.value = currentSelectedAccountId || '';
@@ -1659,8 +2188,18 @@
       });
     });
 
+    document.querySelectorAll('#provider-filter button').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#provider-filter button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        acctFilter = btn.dataset.pf || '';
+        renderAccounts(state.accounts || []);
+      };
+    });
+
     $('btn-refresh').onclick = () => startSync();
-    $('btn-run-local').onclick = () => act(() => call('run_local_now'));
+    ['btn-run-local', 'btn-run-all-2'].forEach(id => $(id).onclick = () => act(() => call('run_local_now')));
+    $('btn-acc-refresh-all').onclick = () => startSync('refresh_credits');
     $('btn-refresh-credits').onclick = () => startSync('refresh_credits');
     $('btn-run-server').onclick = () => act(() => call('run_server_now'));
     ['btn-import-cred', 'btn-import-cred-2'].forEach(id => $(id).onclick = () => $('modal-cred').classList.add('show'));
@@ -1696,19 +2235,19 @@
       const r = await act(() => call('paste_trae_token', $('trae-token').value, $('trae-uid').value));
       if (r && r.ok) $('modal-token').classList.remove('show');
     };
-    $('acc-list').onclick = async (e) => {
+    $('acc-body').onclick = async (e) => {
       const btn = e.target.closest('button[data-act]');
       if (!btn) return;
-      const id = btn.closest('.item').dataset.id;
+      const id = btn.closest('tr').dataset.id;
       const actName = btn.dataset.act;
       let oldAccountIdToReplace = ''; // 用于暂存被替换的旧账号ID
 
-      if (actName === 'local') await act(() => call('set_account_mode', id, 'local'));
-      if (actName === 'server') await act(() => call('set_account_mode', id, 'server'));
+      if (actName === 'checkin') await act(() => call('run_local_now', id));
+      if (actName === 'refresh') await act(() => call('refresh_account', id));
       if (actName === 'upload') await act(() => call('upload_delegate', id));
       if (actName === 'del' && confirm('删除该账号？服务器上的代跑记录也会一并删除。')) await act(() => call('delete_account', id));
       if (actName === 'replace') {
-        oldAccountIdToReplace = btn.dataset.oldId;
+        oldAccountIdToReplace = btn.closest('tr').dataset.oldId;
         $('modal-replace').classList.add('show');
         // 渲染可用于替换的本地账号列表
         // 注意：这里需要传入 state.accounts，因为 renderReplaceAccountList 需要过滤
@@ -1717,6 +2256,12 @@
         $('btn-replace-confirm').dataset.oldAccountId = oldAccountIdToReplace;
         $('btn-replace-confirm').disabled = true; // 默认禁用确认按钮，直到选择新账号
       }
+    };
+    // 模式用下拉而不是两个按钮：一行同时亮起「本机/代跑」看不出当前是哪个
+    $('acc-body').onchange = async (e) => {
+      const sel = e.target.closest('select[data-act="mode"]');
+      if (!sel) return;
+      await act(() => call('set_account_mode', sel.closest('tr').dataset.id, sel.value));
     };
     $('cred-list').onclick = async (e) => {
       const btn = e.target.closest('button[data-cact]');
@@ -1732,19 +2277,23 @@
       $('replace-account-list').innerHTML = '<div class="empty">暂无可用本地账号</div>'; // 清空列表
       $('btn-replace-confirm').dataset.oldAccountId = ''; // 清除暂存的旧账号ID
     };
+    async function saveSettings(okMsg) {
+      const r = await act(() => call('save_settings', collectSettings()), okMsg);
+      if (r && r.ok) showToast(okMsg, 'ok', 2200);
+      return r;
+    }
+
+    $('btn-save-schedule').onclick = async () => {
+      const want = $('set-auto').checked;
+      const r = await saveSettings('签到设置已保存');
+      if (!r || !r.ok) return;
+      // 参考稿把开关结果明说（「自动签到已开启」）：只弹「已保存」，
+      // 用户还得回列表看状态灯才知道今天到底会不会自动跑。
+      showToast(want ? '自动签到已开启' : '自动签到已暂停', want ? 'ok' : 'err', 2600);
+    };
+    $('btn-save-system').onclick = () => saveSettings('本机选项已保存');
     $('btn-save-redeem').onclick = async () => {
-      const saved = await act(() => call('save_settings', {
-        license_base_url: $('set-base').value.trim(),
-        card_code: $('set-card').value.trim(),
-        autostart: $('set-autostart').checked,
-        auto_schedule: $('set-auto').checked,
-        evening_schedule: $('set-evening').checked,
-        traework_auto_capture: $('set-trae-capture').checked,
-        auto_sync: $('set-auto-sync').checked,
-        auto_sync_minutes: Math.min(240, Math.max(1, Number($('set-sync-minutes').value) || 5)),
-        workbuddy_task_mode: $('set-wb-mode').value,
-        workbuddy_chat_tasks: $('set-wb-chat').checked,
-      }), '设置已保存');
+      const saved = await saveSettings('设置已保存');
       if (!saved || !saved.ok) return;
       await act(() => call('redeem', $('set-card').value.trim()));
     };
