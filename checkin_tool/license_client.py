@@ -15,14 +15,36 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-# 惰性导入：run_jane_api → settings → license_client，若在模块顶层 import 会形成
-# 循环导入（settings 取 DEFAULT_APP_KEY 时本模块才执行到第 18 行，常量尚未定义）。
-# 两个函数都只在函数体内用到，因此改为调用时再 import（见 status()）。
+from .redact import mask_text, redact as _redact_secrets
 from .secure_storage import load_json as secure_load_json, save_json as secure_save_json
 
 DEFAULT_APP_KEY = "points-checkin"
 DEFAULT_BASE_URL = "http://111.229.202.251"
 DEFAULT_TIMEOUT = 15.0
+
+
+def _is_https(url: str) -> bool:
+    return str(url or "").strip().lower().startswith("https://")
+
+
+def insecure_transport_allowed(settings: dict[str, Any] | None) -> bool:
+    """是否允许走明文 HTTP 与授权/代跑服务通信。
+
+    默认 True 只为兼容当前尚无 TLS 的授权服务器；一旦服务端配好证书，
+    把 allow_insecure_transport 设为 False 即可强制 https。
+    """
+    return bool((settings or {}).get("allow_insecure_transport", True))
+
+
+def transport_guard(cfg: dict[str, Any]) -> str:
+    """返回错误消息；空字符串表示放行。"""
+    base = str(cfg.get("base_url") or "")
+    if base and not _is_https(base) and not cfg.get("allow_insecure_transport", True):
+        return (
+            "授权服务地址是明文 HTTP，已按设置禁止不安全传输。"
+            "请改用 https 地址，或在设置中临时允许 allow_insecure_transport。"
+        )
+    return ""
 
 
 def _data_root() -> Path:
@@ -235,6 +257,10 @@ def license_cfg_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "require_license": True,
         "timeout": float(settings.get("license_timeout") or DEFAULT_TIMEOUT),
         "prefer_crypto": bool(settings.get("prefer_crypto", False)),
+        "allow_insecure_transport": bool(settings.get("allow_insecure_transport", True)),
+        # 加密通道不可用时是否允许退回明文请求。默认关闭：明文回退等于给
+        # 中间人一个「让请求降级」的开关，卡密与 ticket 都会裸奔。
+        "allow_plain_fallback": bool(settings.get("allow_plain_fallback", False)),
     }
 
 
@@ -275,7 +301,6 @@ def _post_plain(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any
             payload = json.loads(resp.read().decode("utf-8"))
             return payload if isinstance(payload, dict) else {"code": -1, "message": "响应无效"}
     except HTTPError as exc:
-        body_text = ""
         server_message = ""
         try:
             body_text = exc.read().decode("utf-8", errors="ignore")
@@ -284,29 +309,76 @@ def _post_plain(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any
                 server_message = value.get("message") or value.get("msg")
         except Exception:
             pass
-        
+
         # Prioritize server's message, otherwise provide a user-friendly HTTP error
         user_message = server_message or f"服务器响应错误（HTTP {exc.code}），请稍后再试。"
-        return {"code": exc.code, "message": user_message}
+        # 拿到了 HTTP 状态码 = 服务端明确应答，与断网区别对待（授权守卫据此判断是否踢出）
+        return {"code": exc.code, "message": user_message, "networkError": False}
     except URLError as exc:
-        return {"code": -1, "message": f"无法连接到授权服务器，请检查网络连接: {exc.reason}"}
-    except Exception as exc:
-        return {"code": -1, "message": f"授权服务通信异常，请联系技术支持。详情: {str(exc)}"}
+        return {
+            "code": -1,
+            "message": f"无法连接到授权服务器，请检查网络连接: {mask_text(exc.reason)}",
+            "networkError": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "code": -1,
+            "message": f"授权服务通信异常，请联系技术支持。详情: {mask_text(exc)}",
+            "networkError": True,
+        }
 
 
-def _post_json(url: str, body: dict[str, Any], timeout: float, scope: str, prefer_crypto: bool) -> dict[str, Any]:
-    # 服务端敏感接口已强制要求加密信封，始终优先走加密通道，失败时回退明文以兼容旧服务端。
+def _post_json(
+    url: str,
+    body: dict[str, Any],
+    timeout: float,
+    scope: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """敏感接口优先走加密信封。
+
+    加密失败时只在「TLS 通道下」或「显式 allow_plain_fallback」时回退明文，
+    避免中间人只要干扰加密握手就能把卡密 / ticket 降级成裸明文请求。
+    """
+    cfg = cfg or {}
+    prefer_crypto = bool(cfg.get("prefer_crypto"))
+    allow_plain = bool(cfg.get("allow_plain_fallback")) or _is_https(url)
     try:
-        from .crypto_transport import CryptoTransportError, secure_json_request
+        from .crypto_transport import secure_json_request
 
         return secure_json_request(url, body, scope, timeout)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
+        if not allow_plain:
+            return {
+                "code": -1,
+                "cryptoError": True,
+                "networkError": _looks_like_network_error(exc),
+                "message": (
+                    "与授权服务器建立加密通道失败，已拒绝降级为明文请求。"
+                    f"请检查网络环境或联系技术支持。详情: {mask_text(exc, 160)}"
+                ),
+            }
         plain = _post_plain(url, body, timeout)
-        if prefer_crypto:
-            if plain.get("code") in (200, 0, "200", "0") or isinstance(plain.get("data"), dict):
-                return plain
-            return {"code": -1, "message": f"与授权服务器安全通信失败，请检查网络环境或联系技术支持。详情: {exc}"}
-        return plain
+        if not prefer_crypto or not plain.get("networkError"):
+            # 明文请求真的到了服务端：业务码和消息（例如「卡密已被使用」）必须原样
+            # 返回。包成「安全通信失败」会让界面提示和踢出判定都丢掉真实原因。
+            return plain
+        return {
+            "code": -1,
+            "message": f"与授权服务器安全通信失败，请检查网络环境或联系技术支持。详情: {mask_text(exc, 160)}",
+            "networkError": _looks_like_network_error(exc),
+        }
+
+
+def _looks_like_network_error(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "timed out", "timeout", "unreachable", "getaddrinfo",
+            "connection", "refused", "reset by peer", "网络失败",
+        )
+    )
 
 
 def _cache_from_data(data: dict[str, Any], app_key: str) -> dict[str, Any]:
@@ -329,8 +401,15 @@ def _cache_from_data(data: dict[str, Any], app_key: str) -> dict[str, Any]:
     }
 
 
+def public_license_view(data: dict[str, Any] | None) -> dict[str, Any]:
+    """给界面用的授权摘要：去掉 ticket / 卡密，前端不需要也不该拿到它们。"""
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if k not in ("ticket", "primaryCard")}
+
+
 def ticket_still_valid(cache: dict[str, Any] | None = None) -> bool:
-    cache = cache or load_cache()
+    cache = load_cache() if cache is None else cache
     if not cache.get("valid"):
         return False
     if cache.get("timeUnlimited"):
@@ -362,6 +441,16 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
             "cfg": public_cfg,
         }
 
+    blocked_msg = transport_guard(cfg)
+    if blocked_msg:
+        return {
+            "ok": False,
+            "valid": False,
+            "message": blocked_msg,
+            "deviceFingerprint": fp,
+            "cfg": public_cfg,
+        }
+
     if not force_online and ticket_still_valid(cache):
         return {
             "ok": True,
@@ -382,7 +471,7 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
         body,
         cfg["timeout"],
         "app-license.status",
-        cfg["prefer_crypto"],
+        cfg,
     )
     ok, msg, data = _unwrap(resp)
 
@@ -409,7 +498,8 @@ def check_status(settings: dict[str, Any], *, force_online: bool = False) -> dic
             "ok": False,
             "valid": False,
             "message": msg or "授权无效",
-            "raw": resp,
+            "raw": _redact_secrets(resp),
+            "networkError": bool(resp.get("networkError")),
             "deviceFingerprint": fp,
             "cfg": public_cfg,
             "license": cache,
@@ -472,6 +562,9 @@ def redeem(settings: dict[str, Any], card_code: str) -> dict[str, Any]:
         return {"ok": False, "message": "请输入卡密"}
     if not cfg["base_url"]:
         return {"ok": False, "message": "未配置授权服务地址"}
+    blocked_msg = transport_guard(cfg)
+    if blocked_msg:
+        return {"ok": False, "message": blocked_msg}
 
     fp = device_fingerprint()
     resp = _post_json(
@@ -483,11 +576,16 @@ def redeem(settings: dict[str, Any], card_code: str) -> dict[str, Any]:
         },
         cfg["timeout"],
         "app-license.redeem",
-        cfg["prefer_crypto"],
+        cfg,
     )
     ok, msg, data = _unwrap(resp)
     if not ok:
-        return {"ok": False, "message": msg or "兑换失败", "raw": resp}
+        return {
+            "ok": False,
+            "message": msg or "兑换失败",
+            "raw": _redact_secrets(resp),
+            "networkError": bool(resp.get("networkError")),
+        }
 
     cached = _cache_from_data(data, cfg["app_key"])
     if "valid" not in data:

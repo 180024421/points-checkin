@@ -3,16 +3,15 @@
 策略（尽量避免误伤）：
 - 只有**服务端明确拒绝**才踢：check_status 返回 valid=False，且
   （a）带 raw 业务响应体，或（b）ok=True（在线拿到了 200）；
-- 纯网络异常（无 raw、ok=False）只记日志与失败计数，不踢——
-  用户可能只是断网；本地票据仍在时 check_status 自己会返回 offline 有效；
+- 纯网络异常（networkError）与「加密通道建不起来、已拒绝降级明文」（cryptoError）
+  只记日志与失败计数，不踢——用户可能只是断网；本地票据仍在时 check_status 自己会返回 offline 有效；
 - 踢出动作由宿主传入的 on_revoked 执行（停调度/清票据/弹回激活门禁），
-  本模块只做判定与幂等触发。
+  本模块只做判定与幂等触发；重新激活后宿主需调用 reset() 恢复校验。
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime
 from typing import Any, Callable
 
@@ -51,6 +50,17 @@ class LicenseGuard:
     def stop(self) -> None:
         self._stop.set()
 
+    def reset(self) -> None:
+        """卡密重新激活成功后调用：清掉踢出标记并恢复后台校验。
+
+        没有这一步，一旦触发过踢出，本进程内就再也不会做在线校验了。
+        """
+        with self._lock:
+            self._revoked = False
+        self._net_fail = 0
+        self._last = {"at": _now(), "valid": None, "message": "已重新激活，等待下次校验"}
+        self.start()
+
     def status(self) -> dict[str, Any]:
         return {
             "running": bool(self._thread and self._thread.is_alive()),
@@ -81,12 +91,21 @@ class LicenseGuard:
             return {"valid": None, "revoked": False, "message": str(exc), "explicit": False}
 
         if res.get("valid"):
+            from .license_client import public_license_view
+
             self._net_fail = 0
-            self._last = {"at": _now(), "valid": True, "message": res.get("message") or "授权有效", "license": res.get("license")}
+            # 只留界面要用的字段：完整 cache 里有 ticket，宿主的 status() 会被送进渲染进程
+            self._last = {
+                "at": _now(),
+                "valid": True,
+                "message": res.get("message") or "授权有效",
+                "license": public_license_view(res.get("license")),
+            }
             return {"valid": True, "revoked": False, "message": self._last["message"], "explicit": False}
 
-        # 无效：服务端明确拒绝 vs 网络异常
-        explicit = bool(res.get("raw")) or res.get("ok") is True
+        # 无效：服务端明确拒绝 vs 网络异常 / 加密通道异常
+        network_issue = bool(res.get("networkError")) or bool(res.get("cryptoError"))
+        explicit = (bool(res.get("raw")) or res.get("ok") is True) and not network_issue
         message = str(res.get("message") or "授权已失效")
         if explicit:
             self._last = {"at": _now(), "valid": False, "message": message}
@@ -95,7 +114,7 @@ class LicenseGuard:
 
         self._net_fail += 1
         self._last = {"at": _now(), "valid": None, "message": message}
-        self._log(f"授权校验未通过（第 {self._net_fail} 次，疑似网络问题，暂不踢出）：{message}")
+        self._log(f"授权校验未通过（第 {self._net_fail} 次，{message}，暂不踢出）")
         return {"valid": None, "revoked": False, "message": message, "explicit": False}
 
     def _revoke(self, reason: str) -> None:
@@ -114,8 +133,12 @@ class LicenseGuard:
         if self._stop.wait(min(FIRST_DELAY_SEC, self.interval_sec)):
             return
         while not self._stop.is_set():
+            # 被踢出后不退出线程：等待 reset()（重新激活）或 stop()，
+            # 期间跳过校验，避免无意义地反复打服务端。
             if self._revoked:
-                return
+                if self._stop.wait(self.interval_sec):
+                    return
+                continue
             self.check_now()
             if self._stop.wait(self.interval_sec):
                 return
