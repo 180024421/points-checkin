@@ -82,10 +82,15 @@ def default_settings() -> dict[str, Any]:
         # 积分低于该值时列表橙色提醒（仅 WorkBuddy 有积分口径）
         "credit_low_threshold": 100,
         "auto_schedule": True,
+        # 当天所有签到窗口都过完时（机器 20 点后才开机、或窗口设在凌晨），
+        # 启动后补跑一次；关掉就只在窗口内跑。
+        "catchup_on_start": True,
         # 打开程序即同步，之后定时拉服务器状态与本机账号积分（界面 30 秒重读视图）
         "auto_sync": True,
         "auto_sync_minutes": 5,
-        "autostart": False,
+        # 默认开：这台机器曾经连续三天在签到窗口之后才开机，而自启是关的，
+        # 结果谁都没签、界面上还显示一切正常。
+        "autostart": True,
         "minimize_to_tray": True,
         "workbuddy_auth_path": "",
         "traework_user_dir": "",

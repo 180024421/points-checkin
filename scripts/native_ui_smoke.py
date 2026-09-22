@@ -24,6 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from checkin_tool import delegate  # noqa: E402
 from checkin_tool import gui as gui_mod  # noqa: E402
+from checkin_tool import scheduler as scheduler_mod  # noqa: E402
 from checkin_tool.gui import PAGES, CheckinApp  # noqa: E402
 
 PAGES_ORDER = [key for key, _ in PAGES]
@@ -258,6 +259,10 @@ def run_checks(app: CheckinApp, out_dir: pathlib.Path) -> None:
 def main() -> int:
     out_dir = pathlib.Path(tempfile.gettempdir()) / "checkin_native_preview"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 建窗口就会起真调度线程，而它的首轮 tick 可能正好落在窗口内 / 触发启动补签，
+    # 那等于在冒烟脚本里真打供应商。整批签到与代跑凭证同步一律掐成假件。
+    scheduler_mod.run_local_all = lambda **_kwargs: []
+    scheduler_mod.refresh_server_credentials = lambda **_kwargs: []
     app = CheckinApp()
     app._smoke_problems = []  # noqa: SLF001
     # 2 秒足够三轮后台取数回主线程（账号 / 看板 / 积分记录各自一个线程）

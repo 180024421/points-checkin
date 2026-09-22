@@ -58,6 +58,7 @@ def test_checkin_payload_keys_are_all_whitelisted_by_the_webview():
     payload = gui.checkin_settings_payload(
         {
             "auto": True,
+            "catchup": True,
             "sched_hour": "9",
             "sched_min": "10",
             "evening": True,
@@ -74,6 +75,7 @@ def test_checkin_payload_keys_are_all_whitelisted_by_the_webview():
     )
     assert set(payload) == {
         "auto_schedule",
+        "catchup_on_start",
         "schedule_hour",
         "schedule_minute",
         "evening_schedule",
@@ -91,6 +93,17 @@ def test_checkin_payload_keys_are_all_whitelisted_by_the_webview():
     for key, value in payload.items():
         ok, _ = webview_app._SETTING_VALIDATORS[key](value)
         assert ok, f"网页端拒收 {key}={value!r}：两条前端的取值口径已经漂移"
+
+
+def test_catchup_switch_is_wired_on_both_frontends():
+    """新加的设置项不许只活在一边：网页端要有控件 + 读写两处，原生端要有 var。"""
+    assert "catchup_on_start" in HTML
+    assert "$('set-catchup').checked" in HTML          # 读取（回填）
+    assert "catchup_on_start: $('set-catchup').checked" in HTML  # 写回
+    source = pathlib.Path(gui.__file__).read_text(encoding="utf-8")
+    assert "self.var_catchup = tk.BooleanVar" in source
+    assert '"catchup": self.var_catchup.get()' in source
+    assert 'self.var_catchup.set(' in source
 
 
 def test_zero_is_a_real_value_and_reversed_gap_gets_swapped():

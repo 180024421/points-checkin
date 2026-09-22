@@ -13,7 +13,7 @@ from . import account_store, server_client
 from .adapters import traework, workbuddy, workbuddy_tasks
 from .license_client import ensure_licensed
 from .redact import mask_text
-from .settings import load_settings
+from .settings import load_settings, parse_int_field
 
 # 代跑凭证保鲜间隔：服务端不会自己续期，本机定期把刷新后的 token 回传
 SERVER_SYNC_INTERVAL_SEC = 6 * 3600
@@ -375,6 +375,63 @@ def run_local_all(
     return results
 
 
+WINDOW_SEC_DEFAULT = 7200
+
+
+def _window_sec(settings: dict[str, Any]) -> int:
+    """窗口缓冲秒数：脏值退回默认。
+
+    这里吃过 ``int("abc")`` 的亏——设置是能被前端写歪的东西，一旦抛异常，
+    ``_maybe_run_slot`` 就永远进不到判断，整台机器的日签静默停摆。
+    """
+    try:
+        return int(settings.get("schedule_window_sec") or WINDOW_SEC_DEFAULT)
+    except (TypeError, ValueError):
+        return WINDOW_SEC_DEFAULT
+
+
+def slot_targets(settings: dict[str, Any]) -> list[tuple[str, int, int]]:
+    """配置里的签到窗口，按时间排序：``(槽位名, 时, 分)``。脏值退回默认。"""
+    slots: list[tuple[str, int, int]] = [
+        (
+            "morning",
+            parse_int_field(settings.get("schedule_hour"), "schedule_hour"),
+            parse_int_field(settings.get("schedule_minute"), "schedule_minute"),
+        )
+    ]
+    if settings.get("evening_schedule", True):
+        slots.append(
+            (
+                "evening",
+                parse_int_field(settings.get("evening_hour"), "evening_hour"),
+                parse_int_field(settings.get("evening_minute"), "evening_minute"),
+            )
+        )
+    return sorted(slots, key=lambda item: (item[1], item[2]))
+
+
+def plan_startup_catchup(
+    settings: dict[str, Any], now: datetime, fired: set[str], day: str
+) -> str | None:
+    """当天所有窗口都过完了还没跑 → 返回要补的槽位名，否则 ``None``。
+
+    窗口内的正常触发不归这里管（那是 `_maybe_run_slot`）。这里补的是「开机就晚了」这一类：
+    机器 20 点后才有电、窗口缓冲期又已经过完，那种情况下 `_maybe_run_slot` 到死都不会命中，
+    当天一次都不会签，而界面只会安静地显示「今日窗口已过」。
+    """
+    try:
+        if not settings.get("auto_schedule", True) or not settings.get("catchup_on_start", True):
+            return None
+        window = _window_sec(settings)
+        slot, hour, minute = slot_targets(settings)[-1]
+        if f"{day}:启动补签" in fired or f"{day}:{slot}" in fired:
+            return None
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except (AttributeError, TypeError, ValueError, IndexError):
+        return None
+    return slot if (now - target).total_seconds() > window else None
+
+
 class DailyScheduler:
     def __init__(self, log: LogFn | None = None) -> None:
         self._log = log
@@ -447,7 +504,7 @@ class DailyScheduler:
         if key in self._fired:
             return
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        window = int(settings.get("schedule_window_sec") or 7200)
+        window = _window_sec(settings)
         if now < target or (now - target).total_seconds() > window:
             return
         jitter = int(settings.get("schedule_jitter_sec") or 0)
@@ -465,6 +522,23 @@ class DailyScheduler:
         # 异常也算"这个窗口跑过了"：否则会每 20 秒重放一次，反复打供应商并刷满日志。
         # 真漏掉的号还有晚间补漏窗口兜底。
         self._fired.add(key)
+
+    def _maybe_catchup_on_start(self, settings: dict[str, Any], now: datetime, day: str) -> None:
+        """当天的窗口全过完了还没跑 → 启动后补一次。
+
+        判断交给 `plan_startup_catchup`（纯函数，好测），这里只负责「一天最多一轮」和兜底。
+        """
+        slot = plan_startup_catchup(settings, now, self._fired, day)
+        if not slot:
+            return
+        # 先占坑再跑：批量执行一旦抛异常，回到 _loop 时 20 秒后又会进到这里，
+        # 不先记就变成每 20 秒重放一轮整批签到。
+        self._fired.add(self._slot_key(day, "启动补签"))
+        _log(self._log, f"[启动补签] 今天「{slot}」窗口已过，立即补跑一次")
+        try:
+            run_local_all(require_license=True, log=self._log)
+        except Exception as exc:  # noqa: BLE001 - 补签失败不能带崩调度线程
+            _log(self._log, f"[启动补签] 执行异常: {mask_text(exc, 200)}")
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -489,25 +563,12 @@ class DailyScheduler:
                 _log(self._log, f"[代跑凭证] 同步异常: {mask_text(exc, 200)}")
         now = datetime.now()
         day = now.strftime("%Y-%m-%d")
-        # morning
-        self._maybe_run_slot(
-            settings,
-            now,
-            day,
-            "morning",
-            int(settings.get("schedule_hour") or 9),
-            int(settings.get("schedule_minute") or 10),
-        )
-        # evening补漏
-        if settings.get("evening_schedule", True):
-            self._maybe_run_slot(
-                settings,
-                now,
-                day,
-                "evening",
-                int(settings.get("evening_hour") or 20),
-                int(settings.get("evening_minute") or 0),
-            )
+        # 窗口清单与「启动补签」共用 slot_targets，避免两处各写一份、口径慢慢漂开
+        for slot, hour, minute in slot_targets(settings):
+            self._maybe_run_slot(settings, now, day, slot, hour, minute)
+        # 窗口内开机时上面的正常槽位已经把当天标记 fired 了，补签自然不会再抢；
+        # 只有「开机就全过完了」才会真正跑。
+        self._maybe_catchup_on_start(settings, now, day)
 
 
 def clamp_sync_minutes(value: Any, default: int = 5) -> int:

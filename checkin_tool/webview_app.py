@@ -115,6 +115,7 @@ _SETTING_VALIDATORS: dict[str, Callable[[Any], tuple[bool, Any]]] = {
     "card_code": _v_text,
     "autostart": _v_bool,
     "auto_schedule": _v_bool,
+    "catchup_on_start": _v_bool,
     "evening_schedule": _v_bool,
     "traework_auto_capture": _v_bool,
     "auto_sync": _v_bool,
@@ -145,6 +146,11 @@ class CheckinApi:
         self._settings_lock = threading.RLock()
         self._busy: set[str] = set()
         self._busy_lock = threading.Lock()
+        # 注册表条目是设置的派生物：exe 挪过目录后 Run 里还是旧路径，Windows 静默不启动，
+        # 而界面上的勾仍然亮着。启动时对着当前路径核一遍（源码态内部直接返回空串）。
+        message = autostart.repair_on_startup(self.settings)
+        if message:
+            self._append_log(message)
         self.scheduler = DailyScheduler(log=self._append_log)
         if self.settings.get("auto_schedule", True):
             self.scheduler.start()
@@ -305,6 +311,7 @@ class CheckinApi:
                 "card_code": self.settings.get("card_code") or "",
                 "autostart": bool(self.settings.get("autostart")),
                 "auto_schedule": bool(self.settings.get("auto_schedule", True)),
+                "catchup_on_start": bool(self.settings.get("catchup_on_start", True)),
                 "evening_schedule": bool(self.settings.get("evening_schedule", True)),
                 "traework_auto_capture": bool(self.settings.get("traework_auto_capture", True)),
                 "auto_sync": bool(self.settings.get("auto_sync", True)),
@@ -473,10 +480,10 @@ class CheckinApi:
         with self._settings_lock:
             snapshot = dict(self.settings)
         save_settings(snapshot)
-        try:
-            autostart.set_enabled(bool(snapshot.get("autostart")))
-        except Exception as exc:  # noqa: BLE001
-            self._append_log(f"开机自启失败: {exc}")
+        if "autostart" in updates:
+            message = autostart.apply_toggle(bool(snapshot.get("autostart")))
+            if message:
+                self._append_log(message)
         if snapshot.get("auto_schedule"):
             self.scheduler.start()
         else:

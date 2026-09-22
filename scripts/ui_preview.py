@@ -51,6 +51,7 @@ MOCK = r"""
     card_code: 'DEMO-CARD-CODE',
     autostart: true,
     auto_schedule: true,
+    catchup_on_start: true,
     evening_schedule: true,
     traework_auto_capture: true,
     auto_sync: true,

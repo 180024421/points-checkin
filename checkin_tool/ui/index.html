@@ -1487,7 +1487,7 @@
             <input type="number" id="set-sched-hour" min="0" max="23" style="max-width:72px">
             <span class="muted">:</span>
             <input type="number" id="set-sched-min" min="0" max="59" style="max-width:72px">
-            <span class="hint">错过会自动补签</span>
+            <span class="hint">窗口内错过仍可补</span>
           </div>
           <div class="row gap-md" style="align-items:center;margin-top:10px">
             <label class="chk"><input type="checkbox" id="set-evening"> 晚间补漏</label>
@@ -1496,7 +1496,11 @@
             <input type="number" id="set-ev-min" min="0" max="59" style="max-width:72px">
             <span class="hint">到点仍未签的账号再跑一次</span>
           </div>
-          <p class="hint" style="margin-top:9px">实际执行时间在设定值之后 0~2 分钟内随机触发一次，避开整点；窗口内没赶上还会在晚窗补。</p>
+          <div class="row gap-md" style="align-items:center;margin-top:10px">
+            <label class="chk"><input type="checkbox" id="set-catchup"> 开机补签</label>
+            <span class="hint">开机时当天所有窗口都已过完 → 立即补跑一轮（每天最多一次）</span>
+          </div>
+          <p class="hint" style="margin-top:9px">实际执行时间在设定值之后 0~2 分钟内随机触发一次，避开整点；窗口内没赶上还会在晚窗补。机器每天开机就过了点的话，靠上面「开机补签」兜住。</p>
         </div>
 
         <div class="card">
@@ -1972,6 +1976,7 @@
       $('gate-code').value = s.card_code || '';
       $('set-autostart').checked = !!s.autostart;
       $('set-auto').checked = s.auto_schedule !== false;
+      $('set-catchup').checked = s.catchup_on_start !== false;
       $('set-evening').checked = s.evening_schedule !== false;
       $('set-trae-capture').checked = s.traework_auto_capture !== false;
       $('set-auto-sync').checked = s.auto_sync !== false;
@@ -2007,6 +2012,7 @@
         card_code: $('set-card').value.trim(),
         autostart: $('set-autostart').checked,
         auto_schedule: $('set-auto').checked,
+        catchup_on_start: $('set-catchup').checked,
         evening_schedule: $('set-evening').checked,
         traework_auto_capture: $('set-trae-capture').checked,
         auto_sync: $('set-auto-sync').checked,

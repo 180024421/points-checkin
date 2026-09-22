@@ -143,6 +143,7 @@ def checkin_settings_payload(values: dict[str, Any]) -> dict[str, Any]:
     gap_min, gap_max = gap_range(values.get("gap_min"), values.get("gap_max"))
     return {
         "auto_schedule": bool(values.get("auto")),
+        "catchup_on_start": bool(values.get("catchup")),
         "schedule_hour": parse_int_field(values.get("sched_hour"), "schedule_hour"),
         "schedule_minute": parse_int_field(values.get("sched_min"), "schedule_minute"),
         "evening_schedule": bool(values.get("evening")),
@@ -192,6 +193,11 @@ class CheckinApp(tk.Tk):
         # DPAPI 不可用时凭证是明文落盘的，必须让用户看见
         for warning in vault.startup_warnings(data_root()):
             self.append_log(f"[警告] {warning}")
+        # 开机自启的注册表条目是设置的派生物：exe 挪过目录后 Run 里还是旧路径，
+        # Windows 静默不启动，界面上的勾却仍然亮着。源码态内部直接返回空串。
+        autostart_tip = autostart.repair_on_startup(self.settings)
+        if autostart_tip:
+            self.append_log(autostart_tip)
         self.after(0, self.refresh_license)
         self.refresh_accounts()
         self.refresh_today()
@@ -691,7 +697,7 @@ class CheckinApp(tk.Tk):
         ttk.Spinbox(row, from_=0, to=59, width=4, textvariable=self.var_sched_min).pack(
             side="left", padx=(2, 6)
         )
-        ttk.Label(row, text="错过会自动补签", foreground=COL_MUTED).pack(side="left")
+        ttk.Label(row, text="窗口内错过仍可补", foreground=COL_MUTED).pack(side="left")
         row2 = ttk.Frame(box)
         row2.pack(fill="x", pady=(6, 0))
         self.var_evening = tk.BooleanVar(value=bool(s.get("evening_schedule", True)))
@@ -706,9 +712,19 @@ class CheckinApp(tk.Tk):
             side="left", padx=(2, 6)
         )
         ttk.Label(row2, text="到点仍未签的账号再跑一次", foreground=COL_MUTED).pack(side="left")
+        row2b = ttk.Frame(box)
+        row2b.pack(fill="x", pady=(6, 0))
+        self.var_catchup = tk.BooleanVar(value=bool(s.get("catchup_on_start", True)))
+        ttk.Checkbutton(row2b, text="开机补签", variable=self.var_catchup).pack(side="left")
+        ttk.Label(
+            row2b,
+            text="开机时当天所有窗口都已过完 → 立即补跑一轮（每天最多一次）",
+            foreground=COL_MUTED,
+        ).pack(side="left", padx=(6, 0))
         ttk.Label(
             box,
-            text="实际执行时间在设定值之后 0~2 分钟内随机触发一次，避开整点；窗口内没赶上还会在晚窗补。",
+            text="实际执行时间在设定值之后 0~2 分钟内随机触发一次，避开整点；窗口内没赶上还会在晚窗补。"
+            "机器每天开机就过了点的话，靠上面「开机补签」兜住。",
             foreground=COL_MUTED,
             wraplength=860,
             justify="left",
@@ -1084,13 +1100,9 @@ class CheckinApp(tk.Tk):
         self.settings["traework_auto_capture"] = bool(self.var_trae_capture.get())
         self.settings["minimize_to_tray"] = bool(self.var_tray.get())
         save_settings(self.settings)
-        try:
-            autostart.set_enabled(bool(self.var_autostart.get()))
-        except Exception as exc:
-            # except 结束时会解绑 exc，lambda 里直接引用它等于弹窗时才 NameError，先落成普通变量
-            tip = f"开机自启设置失败: {exc}"
-            self.append_log(tip)
-            self.after(0, lambda t=tip: messagebox.showerror("设置失败", t))
+        autostart_tip = autostart.apply_toggle(bool(self.var_autostart.get()))
+        if autostart_tip:
+            self.append_log(autostart_tip)
         if self.var_card.get().strip():
             result = redeem(self.settings, self.var_card.get())
             # 只取 message：str(result) 里含 ticket，弹窗会把票据显示在屏幕上
@@ -1117,6 +1129,7 @@ class CheckinApp(tk.Tk):
     def _checkin_values(self) -> dict[str, Any]:
         return {
             "auto": self.var_auto.get(),
+            "catchup": self.var_catchup.get(),
             "sched_hour": self.var_sched_hour.get(),
             "sched_min": self.var_sched_min.get(),
             "evening": self.var_evening.get(),
@@ -1160,6 +1173,7 @@ class CheckinApp(tk.Tk):
 
     def _fill_checkin_vars(self, settings: dict[str, Any]) -> None:
         self.var_auto.set(bool(settings.get("auto_schedule", True)))
+        self.var_catchup.set(bool(settings.get("catchup_on_start", True)))
         self.var_sched_hour.set(str(settings.get("schedule_hour", 9)))
         self.var_sched_min.set(str(settings.get("schedule_minute", 10)))
         self.var_evening.set(bool(settings.get("evening_schedule", True)))
@@ -1181,13 +1195,10 @@ class CheckinApp(tk.Tk):
         }
         self.settings.update(updates)
         save_settings(self.settings)
-        try:
-            autostart.set_enabled(updates["autostart"])
-        except Exception as exc:
-            self.append_log(f"开机自启设置失败: {exc}")
         self.append_log("本机选项已保存")
-        if not updates["autostart"]:
-            self.append_log("已关闭开机自启")
+        tip = autostart.apply_toggle(updates["autostart"])
+        if tip:
+            self.append_log(tip)
 
     def open_data_dir(self) -> None:
         try:
