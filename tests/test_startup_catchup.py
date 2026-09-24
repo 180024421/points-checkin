@@ -124,6 +124,25 @@ def test_maybe_catchup_does_not_replay_after_an_exception(monkeypatch):
     s._maybe_catchup_on_start(BASE, at("22:05"), DAY)  # 第二次不得再抛
 
 
+def test_maybe_catchup_retries_when_the_vendor_slot_is_busy(monkeypatch):
+    # 启动时自动同步常常正占着供应商槽；补签是一天唯一一次兜底，不能被一轮忙吃掉
+    rounds = iter([[{"ok": False, "busy": True, "message": "已有同步任务在跑"}], []])
+
+    calls = Calls()
+
+    def batch(**kwargs):
+        calls(**kwargs)
+        return next(rounds)
+
+    s = _scheduler(monkeypatch, batch)
+    s._maybe_catchup_on_start(BASE, at("22:05"), DAY)
+    assert calls.count == 1
+    assert f"{DAY}:启动补签" not in s._fired, "让路不能算补签已跑过"
+    s._maybe_catchup_on_start(BASE, at("22:05"), DAY)
+    assert calls.count == 2
+    assert f"{DAY}:启动补签" in s._fired
+
+
 def test_tick_calls_the_catchup_after_the_regular_slots(monkeypatch):
     # _tick 里补签排在正常窗口之后：窗口内开机时正常槽位已经 fired，不会重复跑
     called: list[str] = []

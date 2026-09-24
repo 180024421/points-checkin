@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from . import account_store, server_client
-from .adapters import traework, workbuddy, workbuddy_tasks
+from .adapters import qoder, traework, workbuddy, workbuddy_intl, workbuddy_tasks
 from .license_client import ensure_licensed
 from .redact import mask_text
 from .settings import load_settings, parse_int_field
@@ -62,6 +62,17 @@ def credit_slot_busy() -> bool:
         return _CREDIT_SLOT_BUSY
 
 
+def _acquire_vendor_slot(name: str, log: LogFn | None) -> bool:
+    """跑批前占住全局供应商槽：整批签到/成长任务/凭证保鲜和自动同步用的是同一批 token。
+
+    并发只会换来限流和互相覆盖回写，所以抢不到就整轮跳过，下一轮再说。
+    """
+    if try_acquire_credit_slot():
+        return True
+    _log(log, f"[{name}] 已有签到/同步任务在跑，本轮跳过")
+    return False
+
+
 def _update_account_after_run(account_id: str, result: Any) -> None:
     def patch(row: dict[str, Any]) -> dict[str, Any]:
         if result.ok:
@@ -71,6 +82,9 @@ def _update_account_after_run(account_id: str, result: Any) -> None:
             if result.streak is not None:
                 out["last_streak"] = result.streak
             return out
+        if result.skipped:
+            # 活动没开不是失败：写成 last_error 会让统计卡整天挂着「异常」，但也不标绿
+            return {"last_error": ""}
         return {"last_error": result.message}
 
     account_store.update_account(account_id, patch)
@@ -80,6 +94,7 @@ def _update_account_after_run(account_id: str, result: Any) -> None:
             "provider": getattr(result, "provider", ""),
             "ok": bool(result.ok),
             "already": bool(result.already),
+            "skipped": bool(result.skipped),
             "credits": result.credits,
             "streak": result.streak,
             "message": result.message,
@@ -93,6 +108,10 @@ def run_one_account(account: dict[str, Any], *, log: LogFn | None = None) -> dic
     label = account.get("label") or account.get("id")
     if provider == "workbuddy":
         result = workbuddy.checkin_from_blob(blob)
+    elif provider == "workbuddy_intl":
+        result = workbuddy_intl.checkin_from_blob(blob)
+    elif provider == "qoder":
+        result = qoder.checkin_from_blob(blob)
     elif provider == "traework":
         settings = load_settings()
         if settings.get("traework_ug_api_base") and not blob.get("ug_api_base"):
@@ -121,6 +140,7 @@ def run_one_account(account: dict[str, Any], *, log: LogFn | None = None) -> dic
             "label": label,
             "ok": result.ok,
             "already": result.already,
+            "skipped": result.skipped,
             "credits": result.credits,
             "streak": result.streak,
             "message": result.message,
@@ -146,12 +166,17 @@ def refresh_account_credits(
     blob = account.get("token_blob") if isinstance(account.get("token_blob"), dict) else {}
     if provider == "workbuddy":
         info = workbuddy.query_from_blob(blob)
+    elif provider == "workbuddy_intl":
+        info = workbuddy_intl.query_from_blob(blob)
+    elif provider == "qoder":
+        info = qoder.query_from_blob(blob)
     elif provider == "traework":
         info = traework.query_from_blob(blob)
     else:
         return {"ok": False, "message": "未知 provider"}
     if info.get("ok"):
-        credits = info.get("today_credit") if provider == "workbuddy" else info.get("credits")
+        # workbuddy / workbuddy_intl / qoder 的当日积分都是 today_credit 口径；traework 用 credits
+        credits = info.get("today_credit") if provider in ("workbuddy", "workbuddy_intl", "qoder") else info.get("credits")
         streak = info.get("streak")
         checked_in_today = bool(info.get("today_checked_in"))
         changed = False
@@ -250,7 +275,18 @@ def run_workbuddy_tasks(
 def run_workbuddy_tasks_all(
     *, log: LogFn | None = None, force: bool = False
 ) -> list[dict[str, Any]]:
-    """对所有本机模式的 WorkBuddy 账号跑成长任务。"""
+    """对所有本机模式的 WorkBuddy 账号跑成长任务（整批独占供应商槽）。"""
+    if not _acquire_vendor_slot("成长任务", log):
+        return [{"ok": False, "busy": True, "message": "已有签到/同步任务在跑，请稍后再试"}]
+    try:
+        return _run_workbuddy_tasks_all(log=log, force=force)
+    finally:
+        release_credit_slot()
+
+
+def _run_workbuddy_tasks_all(
+    *, log: LogFn | None = None, force: bool = False
+) -> list[dict[str, Any]]:
     settings = load_settings()
     results: list[dict[str, Any]] = []
     for account in account_store.load_accounts():
@@ -275,6 +311,16 @@ def refresh_server_credentials(*, log: LogFn | None = None) -> list[dict[str, An
     因此本机定期（或每次登录重新采集后）把最新 tokenBlob 推上去，
     代跑才不会因为 token 到期而连续失败。返回每个代跑账号的处理结果。
     """
+    if not _acquire_vendor_slot("代跑凭证", log):
+        # 让路也要和「没有代跑账号」区分开，否则界面会报「没有处于代跑模式的账号」
+        return [{"ok": False, "busy": True, "message": "已有签到/同步任务在跑，请等待其完成"}]
+    try:
+        return _refresh_server_credentials(log=log)
+    finally:
+        release_credit_slot()
+
+
+def _refresh_server_credentials(*, log: LogFn | None = None) -> list[dict[str, Any]]:
     settings = load_settings()
     results: list[dict[str, Any]] = []
     for account in account_store.load_accounts():
@@ -333,7 +379,22 @@ def _run_gap(settings: dict[str, Any]) -> float:
 def run_local_all(
     *, require_license: bool = True, log: LogFn | None = None, account_id: str = ""
 ) -> list[dict[str, Any]]:
-    """本机跑一轮签到。``account_id`` 非空时只跑那一个号（界面行内「签到」）。"""
+    """本机跑一轮签到（整批独占供应商槽）。
+
+    ``account_id`` 非空时只跑那一个号（界面行内「签到」）。定时调度、界面手动跑批、
+    自动同步用的都是同一批 token，并行只会互相覆盖回写并招来限流，所以整批期间占住槽。
+    """
+    if not _acquire_vendor_slot("本机签到", log):
+        return [{"ok": False, "busy": True, "message": "已有签到/同步任务在跑，请等待其完成"}]
+    try:
+        return _run_local_batch(require_license=require_license, log=log, account_id=account_id)
+    finally:
+        release_credit_slot()
+
+
+def _run_local_batch(
+    *, require_license: bool = True, log: LogFn | None = None, account_id: str = ""
+) -> list[dict[str, Any]]:
     settings = load_settings()
     if require_license:
         ok, msg = ensure_licensed(settings, force_online=True)
@@ -516,9 +577,15 @@ class DailyScheduler:
                 return
         _log(self._log, f"[{slot}] 开始本机日签调度")
         try:
-            run_local_all(require_license=True, log=self._log)
+            batch = run_local_all(require_license=True, log=self._log)
         except Exception as exc:  # noqa: BLE001 - 整批兜底：炸在这里会让调度线程结束，之后所有签到静默停摆
             _log(self._log, f"[{slot}] 调度执行异常: {mask_text(exc, 200)}")
+            batch = []
+        # 让路不算跑过：手动跑批/自动同步占着供应商槽时下一轮（20 秒后）再来，
+        # 窗口真过了就不补——那是用户自己在忙，不该拿旧窗口的签到去插队。
+        if any(isinstance(r, dict) and r.get("busy") for r in batch):
+            _log(self._log, f"[{slot}] 供应商正忙，本轮让路")
+            return
         # 异常也算"这个窗口跑过了"：否则会每 20 秒重放一次，反复打供应商并刷满日志。
         # 真漏掉的号还有晚间补漏窗口兜底。
         self._fired.add(key)
@@ -531,14 +598,21 @@ class DailyScheduler:
         slot = plan_startup_catchup(settings, now, self._fired, day)
         if not slot:
             return
+        key = self._slot_key(day, "启动补签")
         # 先占坑再跑：批量执行一旦抛异常，回到 _loop 时 20 秒后又会进到这里，
         # 不先记就变成每 20 秒重放一轮整批签到。
-        self._fired.add(self._slot_key(day, "启动补签"))
+        self._fired.add(key)
         _log(self._log, f"[启动补签] 今天「{slot}」窗口已过，立即补跑一次")
         try:
-            run_local_all(require_license=True, log=self._log)
+            batch = run_local_all(require_license=True, log=self._log)
         except Exception as exc:  # noqa: BLE001 - 补签失败不能带崩调度线程
             _log(self._log, f"[启动补签] 执行异常: {mask_text(exc, 200)}")
+            return
+        # 启动时自动同步/凭证保鲜常常正占着供应商槽，撞上了要把坑还回去：
+        # 补签是一天唯一的一次兜底，不能白让给一轮忙。
+        if any(isinstance(r, dict) and r.get("busy") for r in batch):
+            self._fired.discard(key)
+            _log(self._log, "[启动补签] 供应商正忙，本轮让路，稍后重试")
 
     def _loop(self) -> None:
         while not self._stop.is_set():

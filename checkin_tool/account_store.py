@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .license_client import data_root
@@ -832,6 +832,9 @@ def _process_run_log_entry(row: dict[str, Any]) -> dict[str, Any]:
         status = "已签(之前)"
     elif ok:
         status = "已跑成功"
+    elif row.get("skipped"):
+        # 「没有活动 / 签到未开放」既没领到积分也不算出错，单独一档，别混进失败统计
+        status = "未开放"
     else:
         status = "失败"
     return {
@@ -878,3 +881,117 @@ def today_board(
         "failed_count": len(failed),
         "total_enabled": len(done) + len(pending) + len(failed),
     }
+
+
+def _row_day(row: dict[str, Any]) -> str:
+    day = str(row.get("day") or "")
+    if not day:
+        at = str(row.get("at") or "")
+        day = at[:10] if len(at) >= 10 else ""
+    return day
+
+
+def _run_category(entry: dict[str, Any]) -> str:
+    """把 ``_process_run_log_entry`` 的状态文案归到四档之一。"""
+    st = entry.get("status") or ""
+    if st == "失败":
+        return "failed"
+    if st == "未开放":
+        return "notopen"
+    if st == "已签(之前)":
+        return "already"
+    return "done"
+
+
+def _all_run_rows() -> list[dict[str, Any]]:
+    """本机 + 服务器代跑的全部跑批记录（新在前）。"""
+    rows = list(load_run_logs(limit=MAX_RUN_LOGS))
+    try:
+        rows += list(_aggregated_runs_cached())
+    except Exception:  # noqa: BLE001 - 服务器不可达时只用本机数据
+        pass
+    return rows
+
+
+def history_stats(days: int = 14) -> dict[str, Any]:
+    """跨天跑批趋势：近 ``days`` 天每日成功率 + 期间各账号的失败情况。
+
+    每个 (天, 账号) 只取当天最新一条（跑批记录新在前，先到先算），
+    与今日看板口径一致；「未开放」独立一档、不进分母，避免把没活动算成没签上。
+    """
+    try:
+        span = max(1, min(90, int(days)))
+    except (TypeError, ValueError):
+        span = 14
+    day_keys = {(datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(span)}
+
+    latest: dict[tuple[str, str], str] = {}
+    for row in _all_run_rows():
+        row_day = _row_day(row)
+        if row_day not in day_keys:
+            continue
+        keys = [str(row.get(k) or "") for k in ("account_id", "clientAccountId", "client_account_id")]
+        aid = next((k for k in keys if k), "")
+        if not aid:
+            continue
+        # 同一天同一账号只认最新一条（跑批记录新在前，先到先算）
+        latest.setdefault((row_day, aid), _run_category(_process_run_log_entry(row)))
+
+    per_day: dict[str, dict[str, int]] = {}
+    for (day_key, _aid), cat in latest.items():
+        d = per_day.setdefault(day_key, {"done": 0, "already": 0, "failed": 0, "notopen": 0})
+        d[cat] += 1
+
+    days_out: list[dict[str, Any]] = []
+    for day in sorted(per_day.keys(), reverse=True):
+        counts = per_day[day]
+        signed = counts["done"] + counts["already"]
+        denom = signed + counts["failed"]  # 未开放不计入成功率分母
+        days_out.append(
+            {
+                "day": day,
+                **counts,
+                "signed": signed,
+                "attempted": denom,
+                "success_rate": round(signed / denom, 4) if denom else None,
+            }
+        )
+
+    per_account: dict[str, dict[str, Any]] = {}
+    for (_day_key, aid), cat in latest.items():
+        rec = per_account.setdefault(
+            aid, {"account_id": aid, "runs": 0, "failed": 0, "notopen": 0, "last_status": "", "last_day": ""}
+        )
+        rec["runs"] += 1
+        if cat == "failed":
+            rec["failed"] += 1
+        elif cat == "notopen":
+            rec["notopen"] += 1
+    # 附标签/服务商：尽量从合并视图里取，取不到就留空
+    try:
+        labels = {str(a.get("id")): a for a in load_accounts()}
+        for aid, rec in per_account.items():
+            acc = labels.get(aid) or {}
+            rec["label"] = acc.get("label") or acc.get("id") or aid
+            rec["provider"] = acc.get("provider") or ""
+    except Exception:  # noqa: BLE001
+        for rec in per_account.values():
+            rec.setdefault("label", rec["account_id"])
+            rec.setdefault("provider", "")
+    top_failing = sorted(
+        (r for r in per_account.values() if r["failed"] > 0),
+        key=lambda r: (-r["failed"], r["runs"]),
+    )[:20]
+
+    return {
+        "window_days": span,
+        "days": days_out,
+        "problem_accounts": top_failing,
+        "totals": {
+            "signed": sum(d["signed"] for d in days_out),
+            "failed": sum(d["failed"] for d in days_out),
+            "notopen": sum(d["notopen"] for d in days_out),
+            "attempted": sum(d["attempted"] for d in days_out),
+        },
+    }
+

@@ -1210,6 +1210,38 @@
     </div>
   </div>
 
+  <!-- 粘贴 WorkBuddy 国际版 token：登录态被本机加密，只能手工粘贴 Bearer -->
+  <div class="modal" id="modal-wbi">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>粘贴 WorkBuddy 国际版 Token</h2>
+      </div>
+      <div class="field"><span>Bearer Token</span><input id="wbi-token" type="password" placeholder="Authorization 头里的 Bearer"
+          autocomplete="off"></div>
+      <div class="field"><span>uid（必填）</span><input id="wbi-uid" placeholder="X-User-Id" autocomplete="off"></div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-wbi-cancel">取消</button>
+        <button class="primary" id="btn-wbi-save">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 粘贴 Qoder token：本机可自动解密采集，这里是解密失败（如非 Windows）时的兜底 -->
+  <div class="modal" id="modal-qd">
+    <div class="panel-box">
+      <div class="card-head"><span class="bar"></span>
+        <h2>粘贴 Qoder Token</h2>
+      </div>
+      <div class="field"><span>Bearer Token</span><input id="qd-token" type="password" placeholder="Authorization 头里的 Bearer（dt-…）"
+          autocomplete="off"></div>
+      <div class="field"><span>uid（必填）</span><input id="qd-uid" placeholder="user.id" autocomplete="off"></div>
+      <div class="row end gap-md">
+        <button class="ghost" id="btn-qd-cancel">取消</button>
+        <button class="primary" id="btn-qd-save">导入</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 绑定联系邮箱：可选的提醒渠道，不是代跑前置条件 -->
   <div class="modal" id="modal-bind">
     <div class="panel-box">
@@ -1285,6 +1317,8 @@
             <button class="active" data-pf="">全部</button>
             <button data-pf="traework">TRAE</button>
             <button data-pf="workbuddy">WB</button>
+            <button data-pf="workbuddy_intl">WB国际</button>
+            <button data-pf="qoder">Qoder</button>
           </div>
         </div>
         <div class="side-foot">
@@ -1333,7 +1367,10 @@
             <button id="btn-login-all">统一登录</button>
             <button id="btn-cap-wb">采集 WorkBuddy</button>
             <button id="btn-cap-tw">采集 TraeWork</button>
+            <button id="btn-cap-qd">采集 Qoder</button>
             <button id="btn-paste-tw">粘贴 Trae token</button>
+            <button id="btn-paste-wbi">粘贴 WB国际 token</button>
+            <button id="btn-paste-qd">粘贴 Qoder token</button>
           </div>
         </div>
       </section>
@@ -1369,9 +1406,12 @@
           <div class="row">
             <button class="sm" id="btn-cap-wb-2">从客户端导入 WorkBuddy</button>
             <button class="sm" id="btn-cap-tw-2">从客户端导入 TraeWork</button>
+            <button class="sm" id="btn-cap-qd-2">从客户端导入 Qoder</button>
             <button class="sm" id="btn-import-cred-2">账密导入</button>
             <button class="sm" id="btn-login-all-2">统一登录</button>
             <button class="sm" id="btn-paste-tw-2">粘贴 Trae token</button>
+            <button class="sm" id="btn-paste-wbi-2">粘贴 WB国际 token</button>
+            <button class="sm" id="btn-paste-qd-2">粘贴 Qoder token</button>
             <button class="sm" id="btn-upload">上传代跑</button>
             <button class="sm" id="btn-sync-server">同步代跑凭证</button>
             <button class="sm" id="btn-wb-tasks">执行 WorkBuddy 任务</button>
@@ -1471,6 +1511,26 @@
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="bar"></span>
+            <h2>跑批趋势（近 14 天）</h2>
+            <div class="spacer"></div>
+            <button class="sm" id="btn-refresh-history">刷新</button>
+          </div>
+          <div class="row gap-md" style="align-items:center;margin-bottom:8px">
+            <span class="hint" id="history-summary">加载中…</span>
+          </div>
+          <table class="table">
+            <thead>
+              <tr><th>日期</th><th>已签</th><th>失败</th><th>未开放</th><th>成功率</th></tr>
+            </thead>
+            <tbody id="history-body">
+              <tr><td colspan="5"><div class="empty">暂无数据</div></td></tr>
+            </tbody>
+          </table>
+          <div id="history-problem" class="hint" style="margin-top:8px"></div>
         </div>
       </section>
 
@@ -1593,6 +1653,19 @@
             <div class="input-group">
               <button class="primary" id="btn-backup-data">备份数据</button>
               <button class="primary" id="btn-restore-data">恢复数据</button>
+            </div>
+          </div>
+          <div class="row gap-md" style="align-items:center;margin-top:8px">
+            <span class="label" style="margin:0">本机备份保留份数</span>
+            <input type="number" id="set-backup-keep" min="1" max="100" style="max-width:88px">
+            <span class="hint">超出自动删最旧；凭证绑本机本用户，换机解不开</span>
+            <button class="sm primary" id="btn-save-backup">保存</button>
+          </div>
+          <div class="setting-item" style="margin-top:8px">
+            <span>导出记录（CSV，Excel 可直接打开）</span>
+            <div class="input-group">
+              <button class="sm" id="btn-export-credit">导出积分记录</button>
+              <button class="sm" id="btn-export-runs">导出跑批记录</button>
             </div>
           </div>
         </div>
@@ -1736,7 +1809,7 @@
 
     // 侧栏平台筛选：'' = 全部；账号表按它过滤，统计卡跟着走（和参考稿一致）
     let acctFilter = '';
-    const PROVIDER_LABEL = { traework: 'TRAE', workbuddy: 'WB' };
+    const PROVIDER_LABEL = { traework: 'TRAE', workbuddy: 'WB', workbuddy_intl: 'WB国际', qoder: 'Qoder' };
     const pLabel = (p) => PROVIDER_LABEL[String(p || '').toLowerCase()] || String(p || '其他');
 
     function renderAccStats(rows) {
@@ -1777,14 +1850,15 @@
         const stCls = st === '失败' ? 'bad' : st.startsWith('已') ? 'ok' : '';
         const onlyServer = r.source === 'server';
         const isLocal = !onlyServer && r.run_mode !== 'server';
-        // 阈值提醒按参考稿口径：只对 WorkBuddy 生效，且积分确实取到过（null 不当 0）
-        const low = r.provider === 'workbuddy' && threshold > 0
+        // 阈值提醒按参考稿口径：只对 WorkBuddy（CN/国际版，同为 today_credit 口径）生效，且积分确实取到过（null 不当 0）
+        const isWb = r.provider === 'workbuddy' || r.provider === 'workbuddy_intl';
+        const low = isWb && threshold > 0
           && r.last_credits != null && Number(r.last_credits) < threshold;
         const res = r.last_error || r.today_message
           || (r.last_ok_at ? `最近成功 ${String(r.last_ok_at).slice(5, 16)}` : '—');
         return `
     <tr data-id="${esc(r.id)}" data-old-id="${esc(r.id)}">
-      <td class="plain"><span class="tag ${r.provider === 'workbuddy' ? 'ok' : ''}">${esc(pLabel(r.provider))}</span></td>
+      <td class="plain"><span class="tag ${isWb ? 'ok' : ''}">${esc(pLabel(r.provider))}</span></td>
       <td>
         <div style="font-weight:650">${esc(r.label || r.id)}</div>
         <div class="sub">${esc(r.id)}${r.source === 'server' ? ' · 仅服务器' : ''}</div>
@@ -1990,6 +2064,7 @@
       $('set-gap-min').value = int(s.run_gap_min_sec, 20);
       $('set-gap-max').value = int(s.run_gap_max_sec, 60);
       $('set-low-credit').value = int(s.credit_low_threshold, 100);
+      $('set-backup-keep').value = int(s.backup_keep_count, 10);
     }
 
     // 两个保存按钮都提交这一整包：分开存会各存一半，用户点完「保存设置」
@@ -2026,6 +2101,7 @@
         run_gap_min_sec: gapMin,
         run_gap_max_sec: gapMax,
         credit_low_threshold: clamp('set-low-credit', 0, 1000000, 100),
+        backup_keep_count: clamp('set-backup-keep', 1, 100, 10),
       };
     }
 
@@ -2130,6 +2206,43 @@
       const creditsResult = await call('credit_history', accountId);
       const items = creditsResult.items || [];
       if (dataChanged('creditItems', items)) renderCredits(items);
+      await refreshHistory();
+    }
+
+    async function refreshHistory() {
+      try {
+        const h = await call('get_history', 14);
+        if (dataChanged('history', h)) renderHistory(h);
+      } catch (_) { }
+    }
+
+    function renderHistory(h) {
+      const days = (h && h.days) || [];
+      const body = $('history-body');
+      const sum = $('history-summary');
+      const prob = $('history-problem');
+      if (!days.length) {
+        body.innerHTML = '<tr><td colspan="5"><div class="empty">暂无数据</div></td></tr>';
+        if (sum) sum.textContent = '近 14 天没有跑批记录';
+        if (prob) prob.textContent = '';
+        return;
+      }
+      const pct = (r) => (r == null ? '—' : Math.round(r * 100) + '%');
+      body.innerHTML = days.map(d => `
+        <tr>
+          <td>${d.day}</td>
+          <td>${d.signed}</td>
+          <td style="${d.failed ? 'color:#c0392b' : ''}">${d.failed}</td>
+          <td>${d.notopen}</td>
+          <td>${pct(d.success_rate)}</td>
+        </tr>`).join('');
+      const t = h.totals || {};
+      const overall = t.attempted ? Math.round((t.signed / t.attempted) * 100) + '%' : '—';
+      if (sum) sum.textContent = `近 ${h.window_days || 14} 天：已签 ${t.signed || 0} · 失败 ${t.failed || 0} · 未开放 ${t.notopen || 0} · 整体成功率 ${overall}`;
+      const bad = (h.problem_accounts || []);
+      if (prob) prob.textContent = bad.length
+        ? '老失败的号：' + bad.slice(0, 5).map(a => `${a.label || a.account_id}（失败${a.failed}/${a.runs}）`).join('、')
+        : '期间没有反复失败的账号。';
     }
 
     async function act(fn, okMsg) {
@@ -2212,12 +2325,17 @@
     ['btn-login-all', 'btn-login-all-2'].forEach(id => $(id).onclick = () => act(() => call('unified_login', '')));
     ['btn-cap-wb', 'btn-cap-wb-2'].forEach(id => $(id).onclick = () => act(() => call('capture_workbuddy')));
     ['btn-cap-tw', 'btn-cap-tw-2'].forEach(id => $(id).onclick = () => act(() => call('capture_traework')));
+    ['btn-cap-qd', 'btn-cap-qd-2'].forEach(id => $(id).onclick = () => act(() => call('capture_qoder')));
     ['btn-paste-tw', 'btn-paste-tw-2'].forEach(id => $(id).onclick = () => $('modal-token').classList.add('show'));
+    ['btn-paste-wbi', 'btn-paste-wbi-2'].forEach(id => $(id).onclick = () => $('modal-wbi').classList.add('show'));
+    ['btn-paste-qd', 'btn-paste-qd-2'].forEach(id => $(id).onclick = () => $('modal-qd').classList.add('show'));
     $('btn-upload').onclick = () => act(() => call('upload_delegate', ''));
     $('btn-sync-server').onclick = () => act(() => call('sync_server_credentials'));
     $('btn-wb-tasks').onclick = () => act(() => call('run_workbuddy_tasks'));
     $('btn-cred-cancel').onclick = () => $('modal-cred').classList.remove('show');
     $('btn-token-cancel').onclick = () => $('modal-token').classList.remove('show');
+    $('btn-wbi-cancel').onclick = () => $('modal-wbi').classList.remove('show');
+    $('btn-qd-cancel').onclick = () => $('modal-qd').classList.remove('show');
     $('btn-cred-save').onclick = async () => {
       const batch = $('cred-batch').value.trim();
       if (batch) {
@@ -2241,6 +2359,13 @@
       const r = await act(() => call('paste_trae_token', $('trae-token').value, $('trae-uid').value));
       if (r && r.ok) $('modal-token').classList.remove('show');
     };
+    $('btn-wbi-save').onclick = async () => {
+      const r = await act(() => call('paste_workbuddy_intl_token', $('wbi-token').value, $('wbi-uid').value));
+      if (r && r.ok) $('modal-wbi').classList.remove('show');
+    };
+    $('btn-qd-save').onclick = async () => {
+      const r = await act(() => call('paste_qoder_token', $('qd-token').value, $('qd-uid').value));
+      if (r && r.ok) $('modal-qd').classList.remove('show');
     $('acc-body').onclick = async (e) => {
       const btn = e.target.closest('button[data-act]');
       if (!btn) return;
@@ -2324,9 +2449,23 @@
     $('btn-backup-data').onclick = async () => {
       const r = await act(() => call('backup_data'), '数据备份成功');
       if (r.ok && r.path) {
-        showToast(`数据已备份到：${r.path}`, 'ok');
+        const rm = r.removed && r.removed.length ? `，已清理旧备份 ${r.removed.length} 份` : '';
+        showToast(`数据已备份到：${r.path}${rm}`, 'ok');
       }
     };
+
+    $('btn-save-backup').onclick = async () => {
+      await act(() => call('save_settings', { backup_keep_count: collectSettings().backup_keep_count }), '已保存备份保留份数');
+    };
+    $('btn-export-credit').onclick = async () => {
+      const r = await act(() => call('export_csv', 'credit'), '已导出');
+      if (r.ok) showToast(`已导出 ${r.rows} 行到：${r.path}`, 'ok');
+    };
+    $('btn-export-runs').onclick = async () => {
+      const r = await act(() => call('export_csv', 'runs'), '已导出');
+      if (r.ok) showToast(`已导出 ${r.rows} 行到：${r.path}`, 'ok');
+    };
+    $('btn-refresh-history').onclick = async () => { _renderKeys['history'] = null; await refreshHistory(); };
 
     $('btn-restore-data').onclick = async () => {
       const backupFilePath = prompt('请输入备份文件的完整路径（例如：C:\\Users\\YourUser\\AppData\\Roaming\\points-checkin\\backup\\checkintool_backup_20231027103000.zip）');

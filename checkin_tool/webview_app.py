@@ -8,19 +8,20 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-import zipfile
 
 from . import (
     __version__,
     account_store,
     autostart,
+    backup,
     credential_store,
     delegate,
     license_client,
+    report_export,
     server_client,
     vault,
 )
-from .adapters import traework, workbuddy
+from .adapters import qoder, traework, workbuddy
 from .license_client import (
     check_status,
     clear_cache,
@@ -43,7 +44,7 @@ from .scheduler import (
     run_workbuddy_tasks_all,
     try_acquire_credit_slot,
 )
-from .settings import load_settings, ordered_gap, save_settings, settings_path
+from .settings import load_settings, ordered_gap, save_settings
 from .traework_watcher import TraeWorkAutoCapture
 
 
@@ -128,6 +129,7 @@ _SETTING_VALIDATORS: dict[str, Callable[[Any], tuple[bool, Any]]] = {
     "run_gap_min_sec": _v_int_range(0, 600),
     "run_gap_max_sec": _v_int_range(0, 600),
     "credit_low_threshold": _v_int_range(0, 1000000),
+    "backup_keep_count": _v_int_range(1, 100),
     "traework_user_dir": _v_text,
     "traework_ug_api_base": _v_http_url,
     "workbuddy_task_mode": _v_choice("off", "local", "server"),
@@ -323,6 +325,7 @@ class CheckinApi:
                 "run_gap_min_sec": int(self._setting("run_gap_min_sec", 20) or 0),
                 "run_gap_max_sec": int(self._setting("run_gap_max_sec", 60) or 0),
                 "credit_low_threshold": int(self._setting("credit_low_threshold", 100) or 0),
+                "backup_keep_count": int(self._setting("backup_keep_count", 10) or 10),
                 "traework_user_dir": self.settings.get("traework_user_dir") or "",
                 "workbuddy_task_mode": self.settings.get("workbuddy_task_mode") or "off",
                 "workbuddy_chat_tasks": bool(self.settings.get("workbuddy_chat_tasks", True)),
@@ -347,93 +350,44 @@ class CheckinApi:
         }
 
     def backup_data(self) -> dict[str, Any]:
-        """备份所有数据文件到一个zip文件。"""
-        try:
-            backup_dir = account_store.data_root() / "backup"
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            backup_filename = f"checkintool_backup_{timestamp}.zip"
-            backup_path = backup_dir / backup_filename
-
-            files_to_backup = [
-                account_store.ACCOUNTS_FILE,
-                account_store.RUN_LOG_FILE,
-                account_store.LIVE_LOG_FILE,
-                account_store.CREDIT_HISTORY_FILE,
-                settings_path(),
-                license_client.LICENSE_CACHE,
-                license_client.DEVICE_ID_FILE,
-            ]
-
-            with zipfile.ZipFile(backup_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for file_path in files_to_backup:
-                    if file_path.exists():
-                        zipf.write(file_path, arcname=file_path.name)
-            
-            self._append_log(f"数据已备份到: {backup_path}")
-            return {"ok": True, "message": f"数据已备份到: {backup_path}", "path": str(backup_path)}
-        except Exception as exc:
-            self._append_log(f"数据备份失败: {exc}")
-            return {"ok": False, "message": f"数据备份失败: {exc}"}
-
-    # 备份里允许恢复的文件名（其余一律忽略）：避免恶意 zip 往数据目录写任意文件
-    _RESTORE_ALLOWLIST = {
-        "accounts.json",
-        "run_log.json",
-        "live_log.json",
-        "credit_history.json",
-        "settings.json",
-    }
-    _RESTORE_MAX_MEMBER_BYTES = 20 * 1024 * 1024
+        """备份所有数据文件到一个 zip，并轮转到最近 N 份。"""
+        keep = int(self._setting("backup_keep_count", backup.DEFAULT_KEEP) or backup.DEFAULT_KEEP)
+        return backup.create_backup(keep=keep, log=self._append_log)
 
     def restore_data(self, backup_file_path: str) -> dict[str, Any]:
         """从备份文件恢复数据。"""
-        try:
-            backup_path = Path(str(backup_file_path or "").strip())
-            if not backup_path.is_file():
-                return {"ok": False, "message": "备份文件不存在。"}
-
-            data_root_path = account_store.data_root()
-            restored: list[str] = []
-            skipped: list[str] = []
-            with zipfile.ZipFile(backup_path, 'r') as zipf:
-                for member in zipf.infolist():
-                    if member.is_dir():
-                        continue
-                    name = Path(member.filename).name  # 只取文件名，天然免疫路径穿越
-                    if name not in self._RESTORE_ALLOWLIST:
-                        # license_cache.json / device_id.txt 含票据与设备身份，不参与恢复
-                        skipped.append(name)
-                        continue
-                    if member.file_size > self._RESTORE_MAX_MEMBER_BYTES:
-                        skipped.append(f"{name}(过大)")
-                        continue
-                    with zipf.open(member) as src, open(data_root_path / name, "wb") as outfile:
-                        outfile.write(src.read())
-                    restored.append(name)
-
-            if not restored:
-                return {"ok": False, "message": "备份中没有任何可恢复的数据文件。"}
+        out = backup.restore_from_backup(backup_file_path, log=self._append_log)
+        if out.get("ok"):
             # 重新载入内存副本：否则下一次保存设置会把刚恢复的文件覆盖回旧配置
             with self._settings_lock:
                 self.settings = load_settings()
-            self._append_log(
-                f"数据已从 {backup_path.name} 恢复：{', '.join(restored)}"
-                + (f"；已忽略 {', '.join(skipped)}" if skipped else "")
-                + "。请重启应用以使更改生效。"
-            )
-            return {
-                "ok": True,
-                "message": "数据已恢复。请重启应用以使更改生效。",
-                "restored": restored,
-                "skipped": skipped,
-            }
-        except Exception as exc:
-            self._append_log(f"数据恢复失败: {exc}")
-            return {"ok": False, "message": f"数据恢复失败: {exc}"}
-        except Exception as exc:
-            self._append_log(f"数据恢复失败: {exc}")
-            return {"ok": False, "message": f"数据恢复失败: {exc}"}
+        return out
+
+    def list_backups(self) -> dict[str, Any]:
+        d = backup.backup_dir()
+        files = sorted(d.glob(backup.BACKUP_PREFIX + "*" + backup.BACKUP_SUFFIX), key=lambda p: p.name, reverse=True)
+        return {"ok": True, "dir": str(d), "files": [str(p) for p in files]}
+
+    def export_csv(self, kind: str) -> dict[str, Any]:
+        """把积分历史 / 跑批记录导出成 CSV，落到数据目录下的 export/。"""
+        try:
+            kind = str(kind or "").strip().lower()
+            out_dir = account_store.data_root() / "export"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            if kind == "credit":
+                path = out_dir / f"credit_history_{stamp}.csv"
+                rows = report_export.export_credit_history_csv(path)
+            elif kind == "runs":
+                path = out_dir / f"run_history_{stamp}.csv"
+                rows = report_export.export_run_logs_csv(path)
+            else:
+                return {"ok": False, "message": "kind 只能是 credit 或 runs"}
+            self._append_log(f"已导出 {rows} 行到 {path}")
+            return {"ok": True, "message": f"已导出 {rows} 行", "path": str(path), "rows": rows}
+        except Exception as exc:  # noqa: BLE001 - 导出失败只回报
+            self._append_log(f"导出失败: {exc}")
+            return {"ok": False, "message": f"导出失败: {exc}"}
 
     def poll_logs(self) -> dict[str, Any]:
         with self._lock:
@@ -449,6 +403,14 @@ class CheckinApi:
     def credit_history(self, account_id: str | None = None) -> dict[str, Any]:
         """获取积分历史，支持按账号ID筛选。"""
         return {"ok": True, "items": account_store.load_credit_history(account_id=account_id, limit=200)}
+
+    def get_history(self, days: int = 14) -> dict[str, Any]:
+        """跨天跑批趋势：近 N 天每日成功率 + 期间老失败的账号。"""
+        try:
+            span = int(days)
+        except (TypeError, ValueError):
+            span = 14
+        return {"ok": True, **account_store.history_stats(days=span)}
 
     def license_check_now(self) -> dict[str, Any]:
         """手动触发一次授权校验（含踢出判定），供前端「立即校验」按钮使用。"""
@@ -855,6 +817,111 @@ class CheckinApi:
         self._append_log("已手工导入 TraeWork token")
         return {"ok": True, "message": "已导入"}
 
+    def paste_workbuddy_intl_token(self, token: str = "", uid: str = "") -> dict[str, Any]:
+        """手工导入 WorkBuddy 国际版 Bearer token。
+
+        国际版本机登录态（workbuddy-desktop-ai.info）里的 accessToken 被
+        ``$wbEncrypted`` 信封加密，无法像 CN 那样自动采集，只能由用户从客户端
+        的 ``/v2/billing/meter/*`` 请求里复制 Authorization 头和 X-User-Id 粘进来。
+        """
+        ok, msg = ensure_licensed(self.settings, force_online=True)
+        if not ok:
+            return {"ok": False, "message": msg}
+        token = (token or "").strip()
+        uid = (uid or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if not token:
+            return {"ok": False, "message": "token 不能为空"}
+        if not uid:
+            return {"ok": False, "message": "国际版需要 uid（X-User-Id），不能为空"}
+        blob = {
+            "provider": "workbuddy_intl",
+            "access_token": token,
+            "token": token,
+            "uid": uid,
+            "token_hint": "已手工粘贴（内容已隐藏）",
+        }
+        stored = account_store.try_upsert_account(
+            {
+                "provider": "workbuddy_intl",
+                "label": uid,
+                "identity": uid,
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": blob,
+            }
+        )
+        if not stored.get("ok"):
+            return dict(stored)
+        self._append_log("已手工导入 WorkBuddy 国际版 token")
+        return {"ok": True, "message": "已导入"}
+
+    def capture_qoder(self) -> dict[str, Any]:
+        """从本机 Qoder 客户端解密登录态并入库（auth.v1.dat，OSCrypt v10）。"""
+        ok, msg = ensure_licensed(self.settings, force_online=True)
+        if not ok:
+            return {"ok": False, "message": msg}
+        auth, err = qoder.load_local_auth()
+        if not auth:
+            return {"ok": False, "message": err or "无登录态"}
+        label = str(auth.get("nickname") or auth.get("uid") or "qoder")
+        stored = account_store.try_upsert_account(
+            {
+                "provider": "qoder",
+                "label": label,
+                "identity": auth.get("uid"),
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": auth,
+                "last_error": "",
+            }
+        )
+        if not stored.get("ok"):
+            self._append_log(f"Qoder 未入库：{stored.get('message')}")
+            return dict(stored)
+        self._append_log(f"已入库 Qoder：{label}")
+        suggestion = self._get_replacement_suggestion(stored.get("account") or {})
+        result = {"ok": True, "message": f"已导入 {label}", "count": 1}
+        if suggestion:
+            result["replacement_suggestion"] = suggestion
+        return result
+
+    def paste_qoder_token(self, token: str = "", uid: str = "") -> dict[str, Any]:
+        """手工导入 Qoder Bearer token（本机解密失败时的兜底，如非 Windows）。"""
+        ok, msg = ensure_licensed(self.settings, force_online=True)
+        if not ok:
+            return {"ok": False, "message": msg}
+        token = (token or "").strip()
+        uid = (uid or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if not token:
+            return {"ok": False, "message": "token 不能为空"}
+        if not uid:
+            return {"ok": False, "message": "Qoder 需要 uid（user.id），不能为空"}
+        blob = {
+            "provider": "qoder",
+            "access_token": token,
+            "token": token,
+            "uid": uid,
+            "token_hint": "已手工粘贴（内容已隐藏）",
+        }
+        stored = account_store.try_upsert_account(
+            {
+                "provider": "qoder",
+                "label": uid,
+                "identity": uid,
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": blob,
+            }
+        )
+        if not stored.get("ok"):
+            return dict(stored)
+        self._append_log("已手工导入 Qoder token")
+        return {"ok": True, "message": "已导入"}
+
     def import_credential(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
@@ -973,6 +1040,9 @@ class CheckinApi:
             if not account.get("enabled", True):
                 return {"ok": False, "message": "该账号已停用，先启用再签到"}
             label = f"本机签到 {account.get('label') or account.get('id')}"
+        # 定时调度那一轮也在用同一批 token，它不占界面的任务名，只能看全局槽
+        if credit_slot_busy():
+            return {"ok": False, "busy": True, "message": "已有签到/同步任务在跑，请等待完成"}
         self._append_log(f"开始{label}…")
 
         def worker() -> None:
@@ -1079,6 +1149,8 @@ class CheckinApi:
 
         def worker() -> None:
             results = refresh_server_credentials(log=self._append_log)
+            if results and all(r.get("busy") for r in results):
+                return  # 让路原因已经写进调度日志
             if not results:
                 self._append_log("没有处于代跑模式的账号")
                 return
@@ -1118,6 +1190,8 @@ class CheckinApi:
                 self._append_log(result.get("message") or str(result))
                 return
             results = run_workbuddy_tasks_all(log=self._append_log, force=True)
+            if results and all(r.get("busy") for r in results):
+                return  # 供应商槽被签到/同步占着，原因已在调度日志里
             if not results:
                 self._append_log("没有可执行的 WorkBuddy 账号（需为本机模式且已启用）")
                 return

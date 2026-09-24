@@ -11,11 +11,16 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ..redact import brief, mask_text
 from ..retry_util import retry_call
 from .base import CheckinResult, mask_secret
 
-STATUS_URL = "https://www.codebuddy.cn/v2/billing/meter/checkin-activity-status"
-CHECKIN_URL = "https://www.codebuddy.cn/v2/billing/meter/daily-checkin"
+# CN 版基址；国际版（workbuddy_intl）复用本模块 HTTP 核心，只换 base_url/provider
+BASE_CN = "https://www.codebuddy.cn"
+STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
+CHECKIN_PATH = "/v2/billing/meter/daily-checkin"
+STATUS_URL = BASE_CN + STATUS_PATH
+CHECKIN_URL = BASE_CN + CHECKIN_PATH
 
 AUTH_CANDIDATES = [
     Path(os.environ.get("LOCALAPPDATA", ""))
@@ -48,6 +53,10 @@ def _parse_auth_data(data: Any, source_path: str | Path) -> tuple[dict[str, Any]
     uid = account.get("uid")
     if not token:
         return None, "登录态缺少 accessToken"
+    # 国际版（workbuddy-desktop-ai.info）把 accessToken 存成 $wbEncrypted 信封，
+    # 不能当 CN 的明文 token 用：这里挡掉，避免把一个坏账号混进 CN 列表
+    if isinstance(token, dict):
+        return None, "accessToken 是本机加密信封（疑似国际版），需另行解密或手工采集"
     if not uid:
         return None, "登录态缺少 uid"
     expires = auth.get("expiresAt", 0) or 0
@@ -127,15 +136,16 @@ def _api_post(url: str, token: str, uid: str, timeout: float = 20.0) -> tuple[in
         try:
             return exc.code, json.loads(body)
         except Exception:
-            return exc.code, {"msg": body[:200]}
+            # 非 JSON 的错误页原样进 msg，会随 last_error 落盘并显示在界面上
+            return exc.code, {"msg": brief(body, 200)}
     except URLError as exc:
-        return -1, {"msg": f"网络失败: {exc}"}
+        return -1, {"msg": mask_text(f"网络失败: {exc}", 200)}
     except Exception as exc:
-        return -1, {"msg": str(exc)}
+        return -1, {"msg": mask_text(exc, 200)}
 
 
-def query_status(token: str, uid: str, *, timeout: float = 20.0) -> dict[str, Any]:
-    status, resp = _api_post(STATUS_URL, token, uid, timeout=timeout)
+def query_status(token: str, uid: str, *, timeout: float = 20.0, base_url: str = BASE_CN) -> dict[str, Any]:
+    status, resp = _api_post(f"{base_url}{STATUS_PATH}", token, uid, timeout=timeout)
     data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
     return {
         "ok": status == 200 and resp.get("code") == 0,
@@ -151,23 +161,33 @@ def query_status(token: str, uid: str, *, timeout: float = 20.0) -> dict[str, An
     }
 
 
-def checkin_with_token(token: str, uid: str, *, timeout: float = 20.0) -> CheckinResult:
+def checkin_with_token(
+    token: str,
+    uid: str,
+    *,
+    timeout: float = 20.0,
+    base_url: str = BASE_CN,
+    provider: str = "workbuddy",
+) -> CheckinResult:
     def _once() -> CheckinResult:
-        status_info = query_status(token, uid, timeout=timeout)
+        status_info = query_status(token, uid, timeout=timeout, base_url=base_url)
         if not status_info.get("ok"):
-            msg = status_info.get("message") or status_info
+            # 原来 `or status_info` 会把整个响应字典拼进 message，连着 raw 一起落盘
+            msg = status_info.get("message") or f"HTTP {status_info.get('http')} / code={status_info.get('code')}"
             return CheckinResult(
                 ok=False,
-                provider="workbuddy",
-                message=f"查询签到状态失败：{msg}",
+                provider=provider,
+                message=f"查询签到状态失败：{mask_text(msg, 160)}",
                 raw_summary={"http": status_info.get("http"), "code": status_info.get("code"), "retryable": status_info.get("http", 0) < 0},
             )
         if not status_info.get("active"):
+            # 没有活动不等于「今天已签到」：记成成功会把这格标绿，晚窗也不再补跑
             return CheckinResult(
-                ok=True,
-                provider="workbuddy",
-                already=True,
-                message="当前没有进行中的签到活动",
+                ok=False,
+                provider=provider,
+                already=False,
+                skipped=True,
+                message="当前没有进行中的签到活动，未领到积分",
                 raw_summary={"active": False},
             )
         streak = status_info.get("streak")
@@ -175,7 +195,7 @@ def checkin_with_token(token: str, uid: str, *, timeout: float = 20.0) -> Checki
         if status_info.get("today_checked_in"):
             return CheckinResult(
                 ok=True,
-                provider="workbuddy",
+                provider=provider,
                 already=True,
                 credits=int(today_got) if isinstance(today_got, (int, float)) else None,
                 streak=int(streak) if isinstance(streak, (int, float)) else None,
@@ -183,16 +203,16 @@ def checkin_with_token(token: str, uid: str, *, timeout: float = 20.0) -> Checki
                 raw_summary={"today_checked_in": True},
             )
 
-        status2, resp2 = _api_post(CHECKIN_URL, token, uid, timeout=timeout)
+        status2, resp2 = _api_post(f"{base_url}{CHECKIN_PATH}", token, uid, timeout=timeout)
         code2 = resp2.get("code")
         if status2 == 200 and code2 == 0:
-            refreshed = query_status(token, uid, timeout=timeout)
+            refreshed = query_status(token, uid, timeout=timeout, base_url=base_url)
             if refreshed.get("ok"):
                 today_got = refreshed.get("today_credit", today_got)
                 streak = refreshed.get("streak", streak)
             return CheckinResult(
                 ok=True,
-                provider="workbuddy",
+                provider=provider,
                 credits=int(today_got) if isinstance(today_got, (int, float)) else None,
                 streak=int(streak) if isinstance(streak, (int, float)) else None,
                 message=f"签到成功，获得 {today_got or 0} 积分，连签 {streak or 0} 天",
@@ -201,15 +221,15 @@ def checkin_with_token(token: str, uid: str, *, timeout: float = 20.0) -> Checki
         if code2 == 10001:
             return CheckinResult(
                 ok=True,
-                provider="workbuddy",
+                provider=provider,
                 already=True,
-                message=str(resp2.get("msg") or "今天已签到"),
+                message=mask_text(str(resp2.get("msg") or "今天已签到"), 160),
                 raw_summary={"code": 10001},
             )
         return CheckinResult(
             ok=False,
-            provider="workbuddy",
-            message=f"签到失败：HTTP {status2} / code={code2} / {resp2.get('msg', '')}",
+            provider=provider,
+            message=f"签到失败：HTTP {status2} / code={code2} / {brief(resp2.get('msg') or resp2, 160)}",
             raw_summary={"http": status2, "code": code2, "retryable": status2 < 0},
         )
 
@@ -235,20 +255,22 @@ def checkin_from_local(auth_path: str | Path | None = None) -> CheckinResult:
     return checkin_with_token(auth["access_token"], auth["uid"])
 
 
-def checkin_from_blob(token_blob: dict[str, Any]) -> CheckinResult:
+def checkin_from_blob(
+    token_blob: dict[str, Any], *, base_url: str = BASE_CN, provider: str = "workbuddy"
+) -> CheckinResult:
     token = str(token_blob.get("access_token") or token_blob.get("token") or "").strip()
     uid = str(token_blob.get("uid") or "").strip()
     if not token or not uid:
-        return CheckinResult(ok=False, provider="workbuddy", message="token_blob 缺少 access_token/uid")
+        return CheckinResult(ok=False, provider=provider, message="token_blob 缺少 access_token/uid")
     expires = token_blob.get("expires_at") or token_blob.get("expiresAt")
     if isinstance(expires, (int, float)) and expires > 0 and expires < (time.time() * 1000 + 5 * 60 * 1000):
-        return CheckinResult(ok=False, provider="workbuddy", message="Token 已过期，请重新登录 WorkBuddy 后采集")
-    return checkin_with_token(token, uid)
+        return CheckinResult(ok=False, provider=provider, message="Token 已过期，请重新登录 WorkBuddy 后采集")
+    return checkin_with_token(token, uid, base_url=base_url, provider=provider)
 
 
-def query_from_blob(token_blob: dict[str, Any]) -> dict[str, Any]:
+def query_from_blob(token_blob: dict[str, Any], *, base_url: str = BASE_CN) -> dict[str, Any]:
     token = str(token_blob.get("access_token") or token_blob.get("token") or "").strip()
     uid = str(token_blob.get("uid") or "").strip()
     if not token or not uid:
         return {"ok": False, "message": "缺少 token/uid"}
-    return query_status(token, uid)
+    return query_status(token, uid, base_url=base_url)

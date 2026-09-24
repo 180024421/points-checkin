@@ -46,6 +46,8 @@ def test_provider_labels_agree():
     assert gui.PROVIDER_LABEL == {
         "traework": "TRAE",
         "workbuddy": "WB",
+        "workbuddy_intl": "WB国际",
+        "qoder": "Qoder",
     }
     # 网页端筛选按钮上的文案（TRAE / WB）必须与原生端一致
     for value, text in gui.PROVIDER_FILTERS:

@@ -24,6 +24,7 @@ _INT_FIELDS: dict[str, tuple[int, int, int]] = {
     "run_gap_min_sec": (GAP_SEC_MIN, GAP_SEC_MAX, GAP_SEC_DEFAULT[0]),
     "run_gap_max_sec": (GAP_SEC_MIN, GAP_SEC_MAX, GAP_SEC_DEFAULT[1]),
     "credit_low_threshold": (0, 1_000_000, 100),
+    "backup_keep_count": (1, 100, 10),
 }
 
 
@@ -81,6 +82,8 @@ def default_settings() -> dict[str, Any]:
         "run_gap_max_sec": 60,
         # 积分低于该值时列表橙色提醒（仅 WorkBuddy 有积分口径）
         "credit_low_threshold": 100,
+        # 备份轮转：本机备份目录只保留最近多少份，超出删最旧（凭证绑机器，仅同机可恢复）
+        "backup_keep_count": 10,
         "auto_schedule": True,
         # 当天所有签到窗口都过完时（机器 20 点后才开机、或窗口设在凌晨），
         # 启动后补跑一次；关掉就只在窗口内跑。

@@ -935,18 +935,17 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
     def _once() -> CheckinResult:
         headers = _build_headers(token_blob)
         last_err = "所有 ugApi 均失败"
+        net_failed = False
         for base in _candidate_bases(token_blob):
             status_url = f"{base}{STATUS_PATH}"
             claim_url = f"{base}{CLAIM_PATH}"
             http, resp = _api_post(status_url, headers, timeout=timeout)
             if http < 0:
-                last_err = str(resp.get("msg") or last_err)
-                return CheckinResult(
-                    ok=False,
-                    provider="traework",
-                    message=last_err,
-                    raw_summary={"retryable": True, "base": base},
-                )
+                # 连不上这一个 base 不等于账号废了：换下一个候选继续试。
+                # 原来直接 return，主域名抖一下就把整轮放弃，后面的备用地址根本没被访问过。
+                last_err = brief(resp.get("msg") or last_err, 160)
+                net_failed = True
+                continue
             data = resp.get("data") if isinstance(resp.get("data"), dict) else resp
             if not isinstance(data, dict):
                 last_err = f"{base} 响应无效 HTTP {http}"
@@ -969,10 +968,11 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
                 )
 
             if http == 200 and enable is False:
+                # 「签到未开放」不是「已签到」：记成成功会把今天标成已完成，晚窗也不再补跑
                 return CheckinResult(
-                    ok=True,
+                    ok=False,
                     provider="traework",
-                    already=True,
+                    skipped=True,
                     message=f"签到未开放（{base}）",
                     raw_summary={"base": base, "enable": False},
                 )
@@ -982,7 +982,7 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
                     ok=True,
                     provider="traework",
                     already=True,
-                    credits=int(credits) if isinstance(credits, (int, float)) else 200,
+                    credits=int(credits) if isinstance(credits, (int, float)) else None,
                     message=f"今天已签到（{base}）",
                     raw_summary={"base": base, "checked_in": True},
                 )
@@ -991,17 +991,18 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
                 http2, resp2 = _api_post(claim_url, headers, timeout=timeout)
                 data2 = resp2.get("data") if isinstance(resp2.get("data"), dict) else resp2
                 code2 = data2.get("code") if isinstance(data2, dict) and "code" in data2 else resp2.get("code")
-                if http2 == 200 and (
-                    code2 in (0, None, "0")
-                    or (isinstance(data2, dict) and data2.get("checked_in") is not False)
-                ):
+                # 只认明确的成功信号：code=0 或响应里写着已签到。
+                # 原来的 `code2 in (0, None)` + `checked_in is not False` 把「200 但根本不是业务响应」
+                # （HTML 错误页、网关空响应）也算签到成功，界面就此再不会重试。
+                claimed = code2 in (0, "0") or (isinstance(data2, dict) and data2.get("checked_in") is True)
+                if http2 == 200 and claimed:
                     got = None
                     if isinstance(data2, dict):
                         got = data2.get("credits") or data2.get("credit")
                     return CheckinResult(
                         ok=True,
                         provider="traework",
-                        credits=int(got) if isinstance(got, (int, float)) else 200,
+                        credits=int(got) if isinstance(got, (int, float)) else None,
                         message=f"签到成功（{base}）",
                         raw_summary={"base": base, "claimed": True},
                     )
@@ -1016,7 +1017,12 @@ def checkin_with_blob(token_blob: dict[str, Any], *, timeout: float = 30.0) -> C
                 continue
 
             last_err = f"{base} HTTP {http} / {brief(resp, 160)}"
-        return CheckinResult(ok=False, provider="traework", message=last_err)
+        return CheckinResult(
+            ok=False,
+            provider="traework",
+            message=last_err,
+            raw_summary={"retryable": net_failed},
+        )
 
     def _should_retry(result: CheckinResult) -> bool:
         return (not result.ok) and bool((result.raw_summary or {}).get("retryable"))

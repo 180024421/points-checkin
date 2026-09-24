@@ -18,19 +18,21 @@ import os
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any, Callable
 
 from . import (
     __version__,
     account_store,
     autostart,
+    backup,
     credential_store,
     delegate,
+    report_export,
     server_client,
     vault,
 )
-from .adapters import traework, workbuddy
+from .adapters import qoder, traework, workbuddy
 from .license_client import check_status, data_root, ensure_licensed, redeem
 from .login import login_by_id
 from .redact import mask_text
@@ -50,11 +52,13 @@ from .settings import load_settings, parse_int_field, save_settings
 
 # 与 index.html 的 data-pf / PROVIDER_LABEL 一一对应；口径不一致会出现
 # 「网页筛出 6 个、原生筛出 5 个」这种没法解释的差值。
-PROVIDER_LABEL = {"traework": "TRAE", "workbuddy": "WB"}
+PROVIDER_LABEL = {"traework": "TRAE", "workbuddy": "WB", "workbuddy_intl": "WB国际", "qoder": "Qoder"}
 PROVIDER_FILTERS: tuple[tuple[str, str], ...] = (
     ("", "全部"),
     ("traework", "TRAE"),
     ("workbuddy", "WB"),
+    ("workbuddy_intl", "WB国际"),
+    ("qoder", "Qoder"),
 )
 PAGES: tuple[tuple[str, str], ...] = (
     ("home", "概览"),
@@ -114,8 +118,8 @@ def local_account(row: dict[str, Any]) -> bool:
 
 
 def low_credit(row: dict[str, Any], threshold: int) -> bool:
-    """积分橙色提醒：只对 WorkBuddy 有效，且积分确实取到过（None 不当 0）。"""
-    if str(row.get("provider")) != "workbuddy" or threshold <= 0:
+    """积分橙色提醒：只对 WorkBuddy（CN/国际版，同为 today_credit 口径）有效，且积分确实取到过（None 不当 0）。"""
+    if str(row.get("provider")) not in ("workbuddy", "workbuddy_intl") or threshold <= 0:
         return False
     raw = row.get("last_credits")
     if raw is None:
@@ -174,6 +178,8 @@ class CheckinApp(tk.Tk):
         self.settings = load_settings()
         self.scheduler = DailyScheduler(log=self.append_log)
         self._tray = None
+        # 托盘气泡去重：记住上一轮已经报过的账号，只在「新出问题」时弹一次
+        self._alerted_ids: set[str] = set()
         # 签到/批量登录在直接问供应商，用 _vendor_busy 让自动同步让路；
         # 必须在建界面之前建：按钮回调和后台线程都可能先摸到它。
         self._vendor_busy = threading.Event()
@@ -494,9 +500,11 @@ class CheckinApp(tk.Tk):
         for text, cmd in [
             ("从客户端导入 WorkBuddy", self.capture_workbuddy),
             ("从客户端导入 TraeWork", self.capture_traework),
+            ("从客户端导入 Qoder", self.capture_qoder),
             ("账密导入", self.import_credentials),
             ("统一登录", self.unified_login_all),
             ("粘贴 Trae token", self.paste_trae_token),
+            ("粘贴 WB国际 token", self.paste_workbuddy_intl_token),
         ]:
             ttk.Button(r1, text=text, command=cmd).pack(side="left", padx=2)
         r2 = ttk.Frame(ops)
@@ -871,9 +879,18 @@ class CheckinApp(tk.Tk):
             ("打开数据目录", self.open_data_dir),
         ]:
             ttk.Button(drow, text=text, width=14, command=cmd).pack(side="left", padx=2)
+        brow = ttk.Frame(data)
+        brow.pack(fill="x", pady=(6, 0))
+        ttk.Button(brow, text="备份数据", width=14, command=self.on_backup).pack(side="left", padx=2)
+        ttk.Button(brow, text="恢复数据", width=14, command=self.on_restore).pack(side="left", padx=2)
+        ttk.Label(brow, text="保留份数", foreground=COL_MUTED).pack(side="left", padx=(12, 2))
+        self.var_backup_keep = tk.StringVar(value=str(s.get("backup_keep_count", 10)))
+        ttk.Entry(brow, textvariable=self.var_backup_keep, width=5).pack(side="left")
+        ttk.Button(brow, text="导出积分CSV", width=12, command=lambda: self.on_export_csv("credit")).pack(side="left", padx=2)
+        ttk.Button(brow, text="导出跑批CSV", width=12, command=lambda: self.on_export_csv("runs")).pack(side="left", padx=2)
         ttk.Label(
             data,
-            text=f"数据目录：{data_root()}",
+            text=f"数据目录：{data_root()}；备份只保本机，凭证绑本机本用户、换机解不开",
             foreground=COL_MUTED,
         ).pack(anchor="w", pady=(6, 0))
 
@@ -1206,6 +1223,57 @@ class CheckinApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001 - 打不开目录不算大事
             self.append_log(f"打开数据目录失败：{mask_text(exc, 120)}")
 
+    def on_backup(self) -> None:
+        keep = parse_int_field(self.var_backup_keep.get(), "backup_keep_count")
+        self.settings["backup_keep_count"] = keep
+        save_settings(self.settings)
+
+        def worker() -> None:
+            out = backup.create_backup(keep=keep, log=self.append_log)
+            if out.get("ok"):
+                removed = out.get("removed") or []
+                tip = f"已备份到：{out.get('path')}"
+                if removed:
+                    tip += f"\n已清理旧备份 {len(removed)} 份"
+                self.after(0, lambda: messagebox.showinfo("备份数据", tip))
+            else:
+                self.after(0, lambda: messagebox.showerror("备份数据", out.get("message") or "备份失败"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_restore(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择备份文件",
+            initialdir=str(backup.backup_dir()),
+            filetypes=[("备份压缩包", "*.zip")],
+        )
+        if not path:
+            return
+        if not messagebox.askokcancel("恢复数据", "恢复会覆盖现有数据，并需重启应用生效。是否继续？"):
+            return
+        out = backup.restore_from_backup(path, log=self.append_log)
+        if out.get("ok"):
+            messagebox.showinfo("恢复数据", "数据已恢复，请重启应用以使更改生效。")
+        else:
+            messagebox.showerror("恢复数据", out.get("message") or "恢复失败")
+
+    def on_export_csv(self, kind: str) -> None:
+        out_dir = data_root() / "export"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        try:
+            if kind == "credit":
+                path = out_dir / f"credit_history_{stamp}.csv"
+                rows = report_export.export_credit_history_csv(path)
+            else:
+                path = out_dir / f"run_history_{stamp}.csv"
+                rows = report_export.export_run_logs_csv(path)
+            self.append_log(f"已导出 {rows} 行到 {path}")
+            messagebox.showinfo("导出记录", f"已导出 {rows} 行到：\n{path}")
+        except Exception as exc:  # noqa: BLE001 - 导出失败只回报
+            self.append_log(f"导出失败：{mask_text(exc, 120)}")
+            messagebox.showerror("导出记录", f"导出失败：{mask_text(exc, 120)}")
+
     # ------------------------------------------------------------------ 列表渲染
     def refresh_accounts(self) -> None:
         """取数放后台线程：代跑账号和签到记录都要打服务器，HTTP 不能让 Tk 主循环等。"""
@@ -1277,6 +1345,38 @@ class CheckinApp(tk.Tk):
         else:
             self.lbl_empty.configure(text=f"共 {len(rows)} 个账号" + ("" if not self._provider_filter
                                                                      else f"（已按 {provider_label(self._provider_filter)} 筛选）"))
+        # 主动提醒只看全部账号（不受平台筛选影响），否则切一次筛选就会重复弹
+        self._maybe_alert_tray(self._views, threshold)
+
+    def _maybe_alert_tray(self, views: list[dict[str, Any]], threshold: int) -> None:
+        """账号新出问题（签到失败 / token 过期 / 积分不足）时弹一次托盘气泡，恢复前不重复。"""
+        current: dict[str, str] = {}
+        for view in views:
+            if not view.get("enabled", True):
+                continue
+            aid = str(view.get("id") or "")
+            label = str(view.get("label") or aid)
+            if not aid:
+                continue
+            if view.get("token_expired"):
+                current[aid] = f"{label}：登录 token 已过期，需重新采集/登录"
+            elif view.get("last_error"):
+                current[aid] = f"{label}：{str(view.get('last_error'))[:60]}"
+            elif low_credit(view, threshold):
+                current[aid] = f"{label}：积分偏低（{view.get('last_credits')}）"
+        new = [msg for aid, msg in current.items() if aid not in self._alerted_ids]
+        self._alerted_ids = set(current.keys())
+        for msg in new[:3]:  # 一次最多弹 3 条，避免整批账号出问题刷屏
+            self._notify_tray("签到需要处理", msg)
+
+    def _notify_tray(self, title: str, message: str) -> None:
+        icon = getattr(self, "_tray", None)
+        if icon is None:
+            return
+        try:
+            icon.notify(message, title)
+        except Exception:  # noqa: BLE001 - 通知失败不影响主流程
+            pass
 
     def refresh_today(self) -> None:
         def worker() -> None:
@@ -1407,8 +1507,8 @@ class CheckinApp(tk.Tk):
         if not view.get("enabled", True):
             messagebox.showinfo("签到", "该账号已停用，先启用再签到")
             return
-        if self._vendor_busy.is_set():
-            self.append_log("已有签到/登录在执行，请等待完成")
+        if self._vendor_busy.is_set() or credit_slot_busy():
+            self.append_log("已有签到/登录/同步在执行，请等待完成")
             return
 
         label = f"本机签到 {view.get('label') or account_id}"
@@ -1809,6 +1909,76 @@ class CheckinApp(tk.Tk):
         self.append_log("已手工导入 TraeWork token")
         self.refresh_accounts()
 
+    def paste_workbuddy_intl_token(self) -> None:
+        ok, msg = ensure_licensed(self.settings, force_online=True)
+        if not ok:
+            messagebox.showerror("卡密", msg)
+            return
+        token = simpledialog.askstring("WB国际 token", "粘贴 Authorization 里的 Bearer token：", show="*")
+        if not token or not token.strip():
+            return
+        token = token.strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        uid = (simpledialog.askstring("WB国际 uid", "账号 uid（X-User-Id，必填）：") or "").strip()
+        if not uid:
+            messagebox.showwarning("缺少 uid", "国际版签到需要 uid（X-User-Id），不能为空")
+            return
+        blob = {
+            "provider": "workbuddy_intl",
+            "access_token": token,
+            "token": token,
+            "uid": uid,
+            "token_hint": "已手工粘贴（内容已隐藏）",
+        }
+        stored = account_store.try_upsert_account(
+            {
+                "provider": "workbuddy_intl",
+                "label": uid,
+                "identity": uid,
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": blob,
+            }
+        )
+        if not stored.get("ok"):
+            self.append_log(f"WB国际 token 未入库：{stored.get('message')}")
+            messagebox.showwarning("未入库", str(stored.get("message") or "账号入库失败"))
+            self.refresh_accounts()
+            return
+        self.append_log("已手工导入 WorkBuddy 国际版 token")
+        self.refresh_accounts()
+
+    def capture_qoder(self) -> None:
+        ok, msg = ensure_licensed(self.settings, force_online=True)
+        if not ok:
+            messagebox.showerror("卡密", msg)
+            return
+        auth, err = qoder.load_local_auth()
+        if not auth:
+            messagebox.showerror("采集失败", err or "无登录态")
+            return
+        label = str(auth.get("nickname") or auth.get("uid") or "qoder")
+        stored = account_store.try_upsert_account(
+            {
+                "provider": "qoder",
+                "label": label,
+                "identity": auth.get("uid"),
+                "run_mode": "local",
+                "enabled": True,
+                "token_blob": auth,
+                "last_error": "",
+            }
+        )
+        if not stored.get("ok"):
+            self.append_log(f"Qoder 未入库：{stored.get('message')}")
+            messagebox.showwarning("未入库", str(stored.get("message") or "账号入库失败"))
+            self.refresh_accounts()
+            return
+        self.append_log(f"已入库 Qoder：{label}")
+        self.refresh_accounts()
+        self.refresh_today()
+
     def capture_traework(self) -> None:
         ok, msg = ensure_licensed(self.settings, force_online=True)
         if not ok:
@@ -1908,8 +2078,8 @@ class CheckinApp(tk.Tk):
     # ------------------------------------------------------------------ 跑批入口
     def run_now(self) -> None:
         """「立即全部签到」：账号之间按设置里的随机间隔逐个执行。"""
-        if self._vendor_busy.is_set():
-            self.append_log("已有签到/登录在执行，请等待完成")
+        if self._vendor_busy.is_set() or credit_slot_busy():
+            self.append_log("已有签到/登录/同步在执行，请等待完成")
             return
 
         def worker() -> None:
@@ -1972,6 +2142,8 @@ class CheckinApp(tk.Tk):
 
         def worker() -> None:
             results = refresh_server_credentials(log=self.append_log)
+            if results and all(r.get("busy") for r in results):
+                return  # 让路原因已在日志里，别再误报「没有代跑账号」
             if not results:
                 self.append_log("没有处于代跑模式的账号")
                 return
@@ -1997,6 +2169,8 @@ class CheckinApp(tk.Tk):
 
         def worker() -> None:
             results = run_workbuddy_tasks_all(log=self.append_log, force=True)
+            if results and all(r.get("busy") for r in results):
+                return  # 供应商槽被签到/同步占着，原因已在日志里
             if not results:
                 self.append_log("没有可执行的 WorkBuddy 账号（需为本机模式且已启用）")
                 return
